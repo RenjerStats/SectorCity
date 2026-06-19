@@ -1,0 +1,33 @@
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  color-scheme: dark;
+  --bg: #11141a;
+  --fg: #e6e8eb;
+  --muted: #8b929c;
+  --accent: #4f9dff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+}
+
+/* Канвас 3D-города живёт под DOM-обвязкой и тянется на всё окно. */
+#scene-canvas {
+  position: fixed;
+  inset: 0;
+  display: block;
+}

@@ -1,0 +1,57 @@
+[package]
+name = "sectorcity"
+version = "0.1.0"
+description = "SectorCity — визуализатор занятого места на диске («город в городе»)"
+authors = ["SectorCity"]
+edition = "2021"
+rust-version = "1.77"
+
+# Имя библиотеки с суффиксом `_lib`, чтобы не конфликтовать с бинарём
+# на Windows (одинаковые имена ломают линковку).
+[lib]
+name = "sectorcity_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+# Сериализация IPC. rmp-serde/bincode — запас при раздувании payload.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Скан ФС и агрегация.
+jwalk = "0.8"
+rayon = "1"
+
+# Снимок ФС / diff между снимками.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Async-рантайм и отмена скана (CancellationToken).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio-util = "0.7"
+
+# Ошибки.
+thiserror = "2"
+anyhow = "1"
+
+# Логирование.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- Фаза 3 (включить при необходимости) ---
+# trash = "5"           # безопасное удаление в корзину
+# blake3 = "1"          # хэш для поиска дубликатов
+
+[features]
+# По умолчанию Tauri требует custom-protocol для релизных сборок.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.dev]
+# Зависимости собираем с оптимизацией — иначе скан/рендер тормозят в dev.
+[profile.dev.package."*"]
+opt-level = 2

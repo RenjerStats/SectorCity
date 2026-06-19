@@ -1,0 +1,8 @@
+# Нормализуем переводы строк: в репозитории — LF, в рабочей копии — как у ОС.
+* text=auto eol=lf
+
+# Бинарники не трогаем.
+*.png binary
+*.ico binary
+*.icns binary
+*.svg text eol=lf

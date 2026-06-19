@@ -1,0 +1,21 @@
+# --- Frontend ---
+node_modules
+dist
+dist-ssr
+*.local
+.vite
+
+# --- Логи ---
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# --- Редакторы / ОС ---
+.DS_Store
+Thumbs.db
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# --- Rust / Tauri (см. также src-tauri/.gitignore) ---
+src-tauri/target

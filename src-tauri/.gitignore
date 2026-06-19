@@ -1,0 +1,5 @@
+# Сборочный мусор Rust.
+/target
+
+# Кодоген Tauri (схемы capabilities генерируются при сборке).
+/gen/schemas
