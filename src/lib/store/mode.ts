@@ -8,7 +8,7 @@
  * (позиция оверлея покадрово) пишется в DOM императивно, в обход стора.
  */
 import { atom, computed } from "nanostores";
-import type { NodeId, ScanProgress } from "../ipc/contract";
+import type { NodeId, ScanNode, ScanProgress } from "../ipc/contract";
 
 export type AppMode =
   | { kind: "scanning"; progress: number }
@@ -39,3 +39,28 @@ export const isBusy = computed(
  * Это деталь поверх `appMode.scanning` (которая остаётся грубым флагом режима).
  */
 export const scanProgress = atom<ScanProgress | null>(null);
+
+/**
+ * Наведённый узел (контент для тултипа). Меняется только при переходе на другое
+ * здание — низкочастотно, поэтому в сторе (docs §1). ПОЗИЦИЯ тултипа обновляется
+ * императивно покадрово в обход стора, здесь — только «что показать».
+ * 3D-слой пишет, DOM-слой читает: единственная точка контакта миров.
+ */
+export const hoveredNode = atom<ScanNode | null>(null);
+
+/** Один шаг навигации (хлебная крошка): путь уровня и его имя. */
+export interface Crumb {
+  path: string;
+  name: string;
+}
+
+/**
+ * Стек навигации от корня скана вниз (хлебные крошки). Первый элемент — корень,
+ * последний — текущий уровень. Drill добавляет, «назад»/клик по крошке — срезает.
+ */
+export const breadcrumbs = atom<Crumb[]>([]);
+
+/** Путь текущего (последнего) уровня по стеку крошек, либо `null`. */
+export const currentLevel = computed(breadcrumbs, (c) =>
+  c.length > 0 ? c[c.length - 1].path : null,
+);

@@ -144,6 +144,18 @@ export function buildCity(content: Group, nodes: ScanNode[]): void {
   content.add(mesh);
 }
 
+/**
+ * Текущий `InstancedMesh` уровня (город зданий) внутри контейнера, либо `null`.
+ * Слой взаимодействия берёт через него raycast и `userData.nodes` (мост
+ * `instanceId → ScanNode`). Земля — обычный `Mesh`, поэтому фильтруем по типу.
+ */
+export function getCityMesh(content: Group): InstancedMesh | null {
+  for (const child of content.children) {
+    if (child instanceof InstancedMesh) return child;
+  }
+  return null;
+}
+
 /** Очистить город, освободив GPU-ресурсы (geometry/material обоих типов мешей). */
 export function clearCity(content: Group): void {
   for (const child of [...content.children]) {
