@@ -25,10 +25,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            ipc::start_scan,
-            ipc::get_level,
-            ipc::get_node_detail,
-            ipc::search,
+            ipc::commands::start_scan,
+            ipc::commands::get_level,
+            ipc::commands::get_node_detail,
+            ipc::commands::search,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска приложения Tauri");

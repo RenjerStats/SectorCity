@@ -1,7 +1,8 @@
 //! Граница IPC: контракт данных и команды Tauri.
+//!
+//! Модули публичные намеренно: `tauri::generate_handler!` должен видеть
+//! команды по полному пути (`ipc::commands::start_scan`), иначе не находит
+//! скрытые элементы, которые генерирует макрос `#[tauri::command]`.
 
-mod commands;
-mod contract;
-
-pub use commands::{get_level, get_node_detail, search, start_scan};
-pub use contract::{Category, NodeFlag, ScanNode};
+pub mod commands;
+pub mod contract;

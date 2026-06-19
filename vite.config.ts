@@ -13,7 +13,10 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // Жёстко на IPv4: иначе Vite на Windows слушает ::1, а WebView2/localhost
+    // стучатся в 127.0.0.1 → «не удаётся получить доступ». TAURI_DEV_HOST
+    // переопределяет (работа по сети/мобильные).
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",
