@@ -5,16 +5,29 @@
 //! дерево в состояние; `get_level` отдаёт детей уровня с tail-агрегацией.
 //! Стрим прогресса, отмена и снимок в SQLite — следующие куски фазы 1.
 
-use tauri::{AppHandle, Emitter, State};
+use std::path::PathBuf;
+
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
 
 use super::contract::{ScanNode, ScanProgress};
 use crate::error::{AppError, AppResult};
-use crate::scan::{scan_with, ScanOutcome};
+use crate::scan::{scan_with, snapshot, ScanOutcome};
 use crate::state::AppState;
 
 /// Событие со стримом прогресса скана (троттлинг на бэке ≤ раз/100 мс).
 const SCAN_PROGRESS_EVENT: &str = "scan://progress";
+
+/// Имя файла снимка в каталоге данных приложения.
+const SNAPSHOT_FILE: &str = "snapshot.sqlite";
+
+/// Путь к файлу снимка (каталог данных приложения создаётся при необходимости).
+/// `None`, если каталог данных недоступен.
+pub fn snapshot_db_path(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_data_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(SNAPSHOT_FILE))
+}
 
 /// Запустить скан корня. Тяжёлый обход уносим в blocking-пул; прогресс летит
 /// событиями `scan://progress`, отмена — через `cancel_scan`. Возвращает `true`,
@@ -59,6 +72,20 @@ pub async fn start_scan(
                 done: true,
                 cancelled: false,
             };
+
+            // Снимок пишем в blocking-пуле (диск-IO), дерево возвращаем без клона.
+            let db_path = snapshot_db_path(&app);
+            let tree = tokio::task::spawn_blocking(move || {
+                if let Some(db) = db_path {
+                    if let Err(e) = snapshot::save(&tree, &db) {
+                        tracing::warn!(error = %e, "снимок не сохранён");
+                    }
+                }
+                tree
+            })
+            .await
+            .map_err(|e| AppError::Other(format!("задача снимка прервана: {e}")))?;
+
             *state.scan.lock().unwrap() = Some(tree);
             let _ = app.emit(SCAN_PROGRESS_EVENT, summary);
             Ok(true)
@@ -105,6 +132,18 @@ pub async fn get_level(
         Some(tree) => Ok(tree.level(&path, top_n as usize)),
         None => Ok(super::mock::mock_level(&path)),
     }
+}
+
+/// Корень текущего дерева (загруженного снимка или последнего скана), если есть.
+/// Фронт по нему строит стартовый уровень без рескана.
+#[tauri::command]
+pub fn current_root(state: State<'_, AppState>) -> AppResult<Option<String>> {
+    Ok(state
+        .scan
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|tree| tree.root_node().path.to_string_lossy().into_owned()))
 }
 
 /// Полная правда по одному узлу — для карточки/тултипа.

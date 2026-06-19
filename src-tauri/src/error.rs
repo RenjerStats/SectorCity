@@ -12,11 +12,20 @@ pub enum AppError {
     #[error("ошибка БД: {0}")]
     Db(String),
 
+    #[error("снимок: {0}")]
+    Snapshot(String),
+
     #[error("команда ещё не реализована: {0}")]
     NotImplemented(&'static str),
 
     #[error("{0}")]
     Other(String),
+}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(e: rusqlite::Error) -> Self {
+        AppError::Db(e.to_string())
+    }
 }
 
 /// Tauri требует, чтобы тип ошибки команды реализовывал `Serialize`.

@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ipc::contract::{Category, NodeFlag, ScanNode, ScanProgress};
 
+pub mod snapshot;
+
 /// Минимальный интервал между событиями прогресса (троттлинг, см. docs §5.4).
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 

@@ -21,6 +21,14 @@ export function cancelScan(): Promise<void> {
   return invoke("cancel_scan");
 }
 
+/**
+ * Корень текущего дерева (загруженного снимка или последнего скана) либо `null`.
+ * Фронт по нему строит стартовый уровень без рескана.
+ */
+export function currentRoot(): Promise<string | null> {
+  return invoke("current_root");
+}
+
 /** Дети уровня + превью на +1 уровень; хвост уже свёрнут в «Прочее». */
 export function getLevel(
   path: string,

@@ -4,7 +4,12 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { createScene, type SceneHandle } from "../three/scene";
   import { buildCity } from "../three/city";
-  import { getLevel, startScan, cancelScan } from "../ipc/commands";
+  import {
+    getLevel,
+    startScan,
+    cancelScan,
+    currentRoot,
+  } from "../ipc/commands";
   import { appMode, scanProgress } from "../store/mode";
   import type { ScanProgress } from "../ipc/contract";
 
@@ -39,17 +44,20 @@
         // Вне Tauri событий нет — ожидаемо в чистом vite.
       });
 
-    // Сквозной поток фазы 0: тянем мок-уровень из Rust и строим из него
-    // боксы (не из хардкода). Корень пустой → бэк отдаёт мок верхнего уровня.
+    // Старт: если есть снимок прошлого скана — поднимаем его без рескана,
+    // иначе показываем мок верхнего уровня (корень "" → бэк отдаёт мок).
     appMode.set({ kind: "scanning", progress: 0 });
-    getLevel("", TOP_N, 1)
-      .then((nodes) => {
+    currentRoot()
+      .then(async (root) => {
+        const target = root ?? "";
+        const nodes = await getLevel(target, TOP_N, 1);
         if (handle) buildCity(handle.content, nodes);
-        appMode.set({ kind: "idle", path: "" });
+        handle?.resetView();
+        appMode.set({ kind: "idle", path: target });
       })
       .catch((err) => {
         // Вне Tauri (чистый `vite`) invoke недоступен — это ожидаемо.
-        console.warn("get_level недоступен:", err);
+        console.warn("стартовый уровень недоступен:", err);
         appMode.set({ kind: "idle", path: "" });
       });
 
