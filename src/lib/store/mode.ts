@@ -17,8 +17,8 @@ export type AppMode =
   | { kind: "selected"; path: string; selectedId: NodeId }
   | { kind: "zooming"; from: string; to: string };
 
-/** Единый источник правды по режиму. */
-export const appMode = atom<AppMode>({ kind: "scanning", progress: 0 });
+/** Единый источник правды по режиму. Старт — `idle` (корень не выбран, скана нет). */
+export const appMode = atom<AppMode>({ kind: "idle", path: "" });
 
 /** Текущий путь уровня, если он определён в этом режиме. */
 export const currentPath = computed(appMode, (m) =>

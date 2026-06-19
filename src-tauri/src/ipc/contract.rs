@@ -27,6 +27,8 @@ pub enum NodeFlag {
     Symlink,
     ReparsePoint,
     PermissionDenied,
+    /// Кандидат на очистку (кэш-папка/давность/корзина) — присваивает Classifier.
+    CleanupCandidate,
     /// Синтетический узел «Прочее (N файлов)» — честная сумма хвоста.
     Aggregated,
 }

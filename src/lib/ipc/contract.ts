@@ -26,6 +26,8 @@ export type NodeFlag =
   | "symlink"
   | "reparsePoint"
   | "permissionDenied"
+  /** Кандидат на очистку (кэш-папка/давность/корзина) — присваивает Classifier. */
+  | "cleanupCandidate"
   /** Синтетический узел «Прочее (N файлов)» — честная сумма хвоста. */
   | "aggregated";
 
