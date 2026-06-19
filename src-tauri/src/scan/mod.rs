@@ -17,11 +17,21 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jwalk::WalkDir;
+use tokio_util::sync::CancellationToken;
 
-use crate::ipc::contract::{Category, NodeFlag, ScanNode};
+use crate::ipc::contract::{Category, NodeFlag, ScanNode, ScanProgress};
+
+/// Минимальный интервал между событиями прогресса (троттлинг, см. docs §5.4).
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Результат скана: завершён деревом либо отменён пользователем.
+pub enum ScanOutcome {
+    Completed(ScanTree),
+    Cancelled,
+}
 
 /// Узел дерева скана в арене. Индексы детей ссылаются в `ScanTree::nodes`.
 #[derive(Debug, Clone)]
@@ -202,11 +212,30 @@ fn strip_long_path_prefix(p: &Path) -> PathBuf {
 /// Состояние, протаскиваемое jwalk через обход (счётчик ошибок).
 type WalkState = Arc<AtomicU64>;
 
-/// Просканировать `root`, собрать дерево и свернуть размеры снизу вверх.
+/// Просканировать `root` без отмены и без прогресса (удобная обёртка для тестов).
 ///
 /// Возвращает ошибку только если сам корень недоступен; ошибки на отдельных
 /// входах внутри — пропускаются и считаются в `error_count`.
+#[cfg(test)]
 pub fn scan_root(root: impl AsRef<Path>) -> std::io::Result<ScanTree> {
+    match scan_with(root, &CancellationToken::new(), |_| {})? {
+        ScanOutcome::Completed(tree) => Ok(tree),
+        // Токен не отменяется → ветка недостижима, но возвращаем пустое дерево
+        // вместо паники на всякий случай.
+        ScanOutcome::Cancelled => unreachable!("scan_root: токен не отменяется"),
+    }
+}
+
+/// Просканировать `root` с поддержкой отмены и стримом прогресса.
+///
+/// `cancel` проверяется покадрово по входам — при отмене обход прекращается и
+/// возвращается `ScanOutcome::Cancelled` (дерево не достраивается). `on_progress`
+/// вызывается не чаще, чем раз в [`PROGRESS_INTERVAL`].
+pub fn scan_with(
+    root: impl AsRef<Path>,
+    cancel: &CancellationToken,
+    mut on_progress: impl FnMut(ScanProgress),
+) -> std::io::Result<ScanOutcome> {
     let root = root.as_ref();
     // Корень должен существовать — иначе скан бессмыслен.
     let root_meta = std::fs::metadata(root)?;
@@ -247,7 +276,16 @@ pub fn scan_root(root: impl AsRef<Path>) -> std::io::Result<ScanTree> {
     let mut nodes: Vec<TreeNode> = Vec::new();
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
 
+    // Счётчики для стрима прогресса (троттлинг по времени).
+    let mut bytes_seen: u64 = 0;
+    let mut last_emit = Instant::now();
+
     for entry in walker {
+        // Отмена проверяется на каждом входе — обход прекращается немедленно.
+        if cancel.is_cancelled() {
+            return Ok(ScanOutcome::Cancelled);
+        }
+
         let entry = match entry {
             Ok(e) => e,
             Err(_) => {
@@ -299,6 +337,19 @@ pub fn scan_root(root: impl AsRef<Path>) -> std::io::Result<ScanTree> {
             children: Vec::new(),
             depth,
         });
+
+        // Стрим прогресса с троттлингом, чтобы не топить UI (см. docs §5.4).
+        bytes_seen += size;
+        if last_emit.elapsed() >= PROGRESS_INTERVAL {
+            on_progress(ScanProgress {
+                entries: nodes.len() as u64,
+                bytes: bytes_seen,
+                errors: errors.load(Ordering::Relaxed),
+                done: false,
+                cancelled: false,
+            });
+            last_emit = Instant::now();
+        }
     }
 
     // Может оказаться пустым только если корень-файл не дал записи — но корень
@@ -326,12 +377,12 @@ pub fn scan_root(root: impl AsRef<Path>) -> std::io::Result<ScanTree> {
             depth: 0,
         });
         let by_path = build_path_index(&nodes);
-        return Ok(ScanTree {
+        return Ok(ScanOutcome::Completed(ScanTree {
             nodes,
             root: 0,
             error_count: errors.load(Ordering::Relaxed),
             by_path,
-        });
+        }));
     }
 
     // Пасс 2: связать детей с родителями по пути (parent всегда уже в индексе).
@@ -375,12 +426,12 @@ pub fn scan_root(root: impl AsRef<Path>) -> std::io::Result<ScanTree> {
     let root_idx = parents.iter().position(|p| p.is_none()).unwrap_or(0);
 
     let by_path = build_path_index(&nodes);
-    Ok(ScanTree {
+    Ok(ScanOutcome::Completed(ScanTree {
         nodes,
         root: root_idx,
         error_count: errors.load(Ordering::Relaxed),
         by_path,
-    })
+    }))
 }
 
 /// Индекс «очищенный путь → индекс узла» по арене.
@@ -460,5 +511,19 @@ mod tests {
     fn missing_root_errors() {
         let missing = std::env::temp_dir().join("sectorcity-nope-zzz-does-not-exist");
         assert!(scan_root(&missing).is_err());
+    }
+
+    #[test]
+    fn cancellation_stops_scan() {
+        let root = temp_dir("cancel");
+        write_file(&root.join("a.bin"), 10);
+
+        // Уже отменённый токен → обход прекращается на первом же входе.
+        let token = CancellationToken::new();
+        token.cancel();
+        let outcome = scan_with(&root, &token, |_| {}).unwrap();
+        assert!(matches!(outcome, ScanOutcome::Cancelled));
+
+        fs::remove_dir_all(&root).ok();
     }
 }

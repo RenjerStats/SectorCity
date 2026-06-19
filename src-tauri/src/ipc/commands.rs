@@ -5,29 +5,88 @@
 //! дерево в состояние; `get_level` отдаёт детей уровня с tail-агрегацией.
 //! Стрим прогресса, отмена и снимок в SQLite — следующие куски фазы 1.
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
+use tokio_util::sync::CancellationToken;
 
-use super::contract::ScanNode;
+use super::contract::{ScanNode, ScanProgress};
 use crate::error::{AppError, AppResult};
-use crate::scan::scan_root;
+use crate::scan::{scan_with, ScanOutcome};
 use crate::state::AppState;
 
-/// Запустить скан корня. Тяжёлый обход уносим в blocking-пул, результат кладём
-/// в состояние. Прогресс/отмена появятся отдельным куском (события Tauri).
-#[tauri::command]
-pub async fn start_scan(root: String, state: State<'_, AppState>) -> AppResult<()> {
-    tracing::info!(%root, "start_scan");
-    let scan_root_path = root.clone();
-    let tree = tokio::task::spawn_blocking(move || scan_root(&scan_root_path))
-        .await
-        .map_err(|e| AppError::Other(format!("скан-задача прервана: {e}")))??;
+/// Событие со стримом прогресса скана (троттлинг на бэке ≤ раз/100 мс).
+const SCAN_PROGRESS_EVENT: &str = "scan://progress";
 
-    tracing::info!(
-        nodes = tree.nodes.len(),
-        errors = tree.error_count,
-        "скан завершён"
-    );
-    *state.scan.lock().unwrap() = Some(tree);
+/// Запустить скан корня. Тяжёлый обход уносим в blocking-пул; прогресс летит
+/// событиями `scan://progress`, отмена — через `cancel_scan`. Возвращает `true`,
+/// если скан завершился полностью, и `false`, если был отменён.
+#[tauri::command]
+pub async fn start_scan(
+    root: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<bool> {
+    tracing::info!(%root, "start_scan");
+
+    // Свежий токен отмены: храним клон в состоянии (для cancel_scan), второй
+    // отдаём в blocking-задачу.
+    let token = CancellationToken::new();
+    *state.scan_cancel.lock().unwrap() = Some(token.clone());
+
+    let emit_handle = app.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        scan_with(&root, &token, move |progress| {
+            // Ошибку эмита глотаем: скан важнее доставки прогресса.
+            let _ = emit_handle.emit(SCAN_PROGRESS_EVENT, progress);
+        })
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("скан-задача прервана: {e}")))??;
+
+    // Скан окончен (успех/отмена) — снять токен.
+    *state.scan_cancel.lock().unwrap() = None;
+
+    match outcome {
+        ScanOutcome::Completed(tree) => {
+            tracing::info!(
+                nodes = tree.nodes.len(),
+                errors = tree.error_count,
+                "скан завершён"
+            );
+            let summary = ScanProgress {
+                entries: tree.nodes.len() as u64,
+                bytes: tree.root_node().size,
+                errors: tree.error_count,
+                done: true,
+                cancelled: false,
+            };
+            *state.scan.lock().unwrap() = Some(tree);
+            let _ = app.emit(SCAN_PROGRESS_EVENT, summary);
+            Ok(true)
+        }
+        ScanOutcome::Cancelled => {
+            tracing::info!("скан отменён");
+            let _ = app.emit(
+                SCAN_PROGRESS_EVENT,
+                ScanProgress {
+                    entries: 0,
+                    bytes: 0,
+                    errors: 0,
+                    done: true,
+                    cancelled: true,
+                },
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Отменить текущий скан (если идёт). Идемпотентно: без активного скана — no-op.
+#[tauri::command]
+pub fn cancel_scan(state: State<'_, AppState>) -> AppResult<()> {
+    if let Some(token) = state.scan_cancel.lock().unwrap().as_ref() {
+        tracing::info!("cancel_scan");
+        token.cancel();
+    }
     Ok(())
 }
 

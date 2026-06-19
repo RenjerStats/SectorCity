@@ -8,7 +8,7 @@
  * (позиция оверлея покадрово) пишется в DOM императивно, в обход стора.
  */
 import { atom, computed } from "nanostores";
-import type { NodeId } from "../ipc/contract";
+import type { NodeId, ScanProgress } from "../ipc/contract";
 
 export type AppMode =
   | { kind: "scanning"; progress: number }
@@ -32,3 +32,10 @@ export const isBusy = computed(
   appMode,
   (m) => m.kind === "zooming" || m.kind === "scanning",
 );
+
+/**
+ * Детальный прогресс активного скана; `null`, когда скан не идёт.
+ * Низкочастотное (≤10/с после троттлинга бэка) — допустимо держать в сторе.
+ * Это деталь поверх `appMode.scanning` (которая остаётся грубым флагом режима).
+ */
+export const scanProgress = atom<ScanProgress | null>(null);

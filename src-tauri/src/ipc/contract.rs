@@ -33,6 +33,24 @@ pub enum NodeFlag {
     Aggregated,
 }
 
+/// Прогресс скана — летит потоком событий `scan://progress` (троттлинг на
+/// бэке ≤ раз/100 мс). Финальное событие имеет `done = true`.
+/// ВАЖНО: зеркало TS-типа `ScanProgress` (src/lib/ipc/contract.ts).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanProgress {
+    /// Сколько входов ФС уже обработано.
+    pub entries: u64,
+    /// Сумма размеров файлов, увиденных к этому моменту (байты).
+    pub bytes: u64,
+    /// Сколько входов пропущено из-за ошибок доступа.
+    pub errors: u64,
+    /// Скан завершён (успехом или отменой).
+    pub done: bool,
+    /// Скан был отменён пользователем (валиден при `done`).
+    pub cancelled: bool,
+}
+
 /// Один узел дерева ФС в том виде, в каком он уходит на фронт.
 /// Для папок `size` — уже свёрнутая рекурсивная сумма.
 #[derive(Debug, Clone, Serialize, Deserialize)]

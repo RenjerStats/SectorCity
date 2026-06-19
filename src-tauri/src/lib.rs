@@ -30,6 +30,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             ipc::commands::start_scan,
+            ipc::commands::cancel_scan,
             ipc::commands::get_level,
             ipc::commands::get_node_detail,
             ipc::commands::search,

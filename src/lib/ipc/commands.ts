@@ -8,9 +8,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ScanNode } from "./contract";
 
-/** Запустить скан корня; прогресс приходит отдельным потоком событий. */
-export function startScan(root: string): Promise<void> {
+/**
+ * Запустить скан корня; прогресс приходит событиями `scan://progress`.
+ * Резолвится в `true`, если скан завершился, и `false`, если отменён.
+ */
+export function startScan(root: string): Promise<boolean> {
   return invoke("start_scan", { root });
+}
+
+/** Отменить текущий скан (если идёт). Идемпотентно. */
+export function cancelScan(): Promise<void> {
+  return invoke("cancel_scan");
 }
 
 /** Дети уровня + превью на +1 уровень; хвост уже свёрнут в «Прочее». */
