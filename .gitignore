@@ -19,3 +19,8 @@ Thumbs.db
 
 # --- Rust / Tauri (см. также src-tauri/.gitignore) ---
 src-tauri/target
+
+# --- Артефакты разработки (не часть продукта) ---
+CLAUDE.md
+docs/
+.serena/
