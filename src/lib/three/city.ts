@@ -1,83 +1,91 @@
 /**
- * Построение «города» одного уровня из данных (фаза 0).
+ * Построение «города» одного уровня из данных (фаза 1).
  *
- * Берёт `ScanNode[]`, раскладывает их детерминированной раскладкой и строит
- * боксы через единый модуль координат `layoutToWorld`. Кодирование (черновое
- * для фазы 0): площадь основания ∝ размер, высота ∝ устаревание (mtime),
- * цвет = категория. Настоящий squarified-treemap и InstancedMesh — фаза 1+.
+ * Раскладка — squarified-treemap (`d3-hierarchy`): честная площадь основания ∝
+ * размер. Рендер — один `InstancedMesh` на весь уровень (нативная скорость,
+ * см. docs §5.2). Кодирование: площадь = размер, высота = устаревание (mtime),
+ * цвет = категория (палитра — `palette.ts`).
  *
- * Раскладка детерминирована: один и тот же вход даёт ту же геометрию
- * (пространственная память, см. ТЗ).
+ * Перевод координат d3 → мир идёт ТОЛЬКО через `layoutToWorld` (единая
+ * конвенция осей, docs §5.6). Раскладка детерминирована: тот же вход (узлы уже
+ * приходят отсортированными по размеру) даёт ту же геометрию — пространственная
+ * память (ТЗ).
  */
-import { BoxGeometry, Color, Group, Mesh, MeshLambertMaterial } from "three";
-import type { Category, ScanNode } from "../ipc/contract";
+import {
+  BoxGeometry,
+  Color,
+  Group,
+  InstancedMesh,
+  Mesh,
+  MeshLambertMaterial,
+  Object3D,
+  PlaneGeometry,
+} from "three";
+import { hierarchy, treemap, treemapSquarify } from "d3-hierarchy";
+import type { ScanNode } from "../ipc/contract";
+import { CATEGORY_COLOR, GROUND_COLOR } from "./palette";
 import { layoutToWorld, type TreemapRect } from "./layoutToWorld";
 
-/** Палитра по категориям (черновая, colorblind-aware уточним в фазе 2). */
-const CATEGORY_COLOR: Record<Category, number> = {
-  code: 0x4e79a7,
-  document: 0xf28e2b,
-  image: 0x59a14f,
-  video: 0xe15759,
-  audio: 0xb07aa1,
-  archive: 0xedc948,
-  binary: 0x76b7b2,
-  other: 0x8a8f98,
-};
-
-/** Целевой размах города по стороне, мировые единицы. */
+/** Целевой размах города по стороне (мировые единицы) — сторона treemap-холста. */
 const CITY_SPAN = 200;
+/** Отступ между прямоугольниками (padded treemap) — читаемость границ. */
+const TILE_PADDING = 1.5;
 /** Диапазон высоты здания (устаревание), мировые единицы. */
 const MIN_HEIGHT = 4;
 const MAX_HEIGHT = 70;
 /** Горизонт «устаревания»: возраст, при котором высота упирается в максимум. */
 const MAX_AGE_SECONDS = 3 * 365 * 24 * 3600; // ~3 года
+/** Минимальное значение площади, чтобы нулевые узлы не вырождались в точку. */
+const MIN_VALUE = 1;
+
+/** Обёртка датума для d3-иерархии: либо синтетический корень, либо узел уровня. */
+interface TreeDatum {
+  node?: ScanNode;
+  children?: TreeDatum[];
+}
 
 /**
- * Простая детерминированная раскладка: квадраты со стороной ∝ √размер,
- * уложенные строками с переносом. Возвращает прямоугольники в координатах
- * раскладки (y вниз), сцентрированные около начала координат.
+ * Squarified-treemap текущего уровня. Возвращает прямоугольники в координатах
+ * раскладки (y вниз), сцентрированные около начала координат, в порядке,
+ * совпадающем с порядком `nodes`.
  */
 function layoutNodes(nodes: ScanNode[]): TreemapRect[] {
-  const maxSize = Math.max(1, ...nodes.map((n) => n.size));
-  // Масштаб так, чтобы крупнейший узел получил заметную, но не гигантскую долю.
-  const scale = (CITY_SPAN * 0.35) / Math.sqrt(maxSize);
-  const gap = 4;
-  const rowWidth = CITY_SPAN;
+  const rootDatum: TreeDatum = { children: nodes.map((node) => ({ node })) };
 
-  const rects: TreemapRect[] = [];
-  let cursorX = 0;
-  let cursorY = 0;
-  let rowHeight = 0;
+  const root = hierarchy<TreeDatum>(rootDatum, (d) => d.children).sum((d) =>
+    d.node ? Math.max(d.node.size, MIN_VALUE) : 0,
+  );
 
-  for (const node of nodes) {
-    const side = Math.max(6, Math.sqrt(node.size) * scale);
-    if (cursorX > 0 && cursorX + side > rowWidth) {
-      cursorX = 0;
-      cursorY += rowHeight + gap;
-      rowHeight = 0;
+  const laidOut = treemap<TreeDatum>()
+    .tile(treemapSquarify)
+    .size([CITY_SPAN, CITY_SPAN])
+    .paddingInner(TILE_PADDING)(root);
+
+  // Сопоставление узел → прямоугольник по идентичности данных (порядок листьев
+  // d3 не обязан совпадать с входным), затем выдаём в порядке `nodes`.
+  const byNode = new Map<ScanNode, TreemapRect>();
+  for (const leaf of laidOut.leaves()) {
+    if (leaf.data.node) {
+      byNode.set(leaf.data.node, {
+        x0: leaf.x0,
+        y0: leaf.y0,
+        x1: leaf.x1,
+        y1: leaf.y1,
+      });
     }
-    rects.push({
-      x0: cursorX,
-      y0: cursorY,
-      x1: cursorX + side,
-      y1: cursorY + side,
-    });
-    cursorX += side + gap;
-    rowHeight = Math.max(rowHeight, side);
   }
 
-  // Центрируем весь набор относительно начала координат.
-  const maxX = Math.max(...rects.map((r) => r.x1));
-  const maxY = Math.max(...rects.map((r) => r.y1));
-  const dx = maxX / 2;
-  const dy = maxY / 2;
-  return rects.map((r) => ({
-    x0: r.x0 - dx,
-    y0: r.y0 - dy,
-    x1: r.x1 - dx,
-    y1: r.y1 - dy,
-  }));
+  const half = CITY_SPAN / 2;
+  return nodes.map((node) => {
+    const r = byNode.get(node) ?? { x0: 0, y0: 0, x1: 0, y1: 0 };
+    // Центрируем холст treemap относительно начала координат.
+    return {
+      x0: r.x0 - half,
+      y0: r.y0 - half,
+      x1: r.x1 - half,
+      y1: r.y1 - half,
+    };
+  });
 }
 
 /** Высота из устаревания: чем старше mtime, тем выше (канал «устаревание»). */
@@ -88,38 +96,59 @@ function heightFromMtime(mtime: number, nowSeconds: number): number {
 }
 
 /**
- * Заполнить контейнер сцены боксами по данным уровня. Предыдущее содержимое
+ * Заполнить контейнер сцены городом по данным уровня. Предыдущее содержимое
  * очищается с явным освобождением geometry/material (без утечек GPU при смене
- * уровня — см. docs/SectorCity-tech.md §5).
+ * уровня — docs §5.5). Узлы уровня рисуются одним `InstancedMesh`.
+ *
+ * В `userData.nodes` инстанс-меша кладётся массив узлов в порядке инстансов —
+ * мост `instanceId → ScanNode` для будущего пикинга (фаза 1, взаимодействие).
  */
 export function buildCity(content: Group, nodes: ScanNode[]): void {
   clearCity(content);
   if (nodes.length === 0) return;
 
+  // Земля под городом — нейтральный тинт, чтобы город «стоял» на плоскости.
+  const ground = new Mesh(
+    new PlaneGeometry(CITY_SPAN * 1.1, CITY_SPAN * 1.1),
+    new MeshLambertMaterial({ color: new Color(GROUND_COLOR) }),
+  );
+  ground.rotation.x = -Math.PI / 2; // в плоскость XZ
+  ground.position.y = -0.01; // чуть ниже основания зданий
+  content.add(ground);
+
   const rects = layoutNodes(nodes);
   const nowSeconds = Math.floor(Date.now() / 1000);
 
+  // Единичный бокс (центр в начале), масштабируем/двигаем матрицей инстанса.
+  const geometry = new BoxGeometry(1, 1, 1);
+  const material = new MeshLambertMaterial();
+  const mesh = new InstancedMesh(geometry, material, nodes.length);
+
+  const dummy = new Object3D();
+  const color = new Color();
   nodes.forEach((node, i) => {
     const height = heightFromMtime(node.mtime, nowSeconds);
     const box = layoutToWorld(rects[i], height);
 
-    const geometry = new BoxGeometry(box.width, box.height, box.depth);
-    const material = new MeshLambertMaterial({
-      color: new Color(CATEGORY_COLOR[node.category]),
-    });
-    const mesh = new Mesh(geometry, material);
-    // Бокс центрируется по своей высоте → приподнимаем, чтобы стоял на земле.
-    mesh.position.set(box.centerX, box.height / 2, box.centerZ);
-    mesh.userData.path = node.path; // пригодится для picking в фазе 1
-    content.add(mesh);
+    dummy.position.set(box.centerX, box.height / 2, box.centerZ);
+    dummy.scale.set(box.width, box.height, box.depth);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+    mesh.setColorAt(i, color.set(CATEGORY_COLOR[node.category]));
   });
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+
+  // Мост для пикинга: индекс инстанса → узел.
+  mesh.userData.nodes = nodes;
+  content.add(mesh);
 }
 
-/** Очистить город, освободив GPU-ресурсы. */
+/** Очистить город, освободив GPU-ресурсы (geometry/material обоих типов мешей). */
 export function clearCity(content: Group): void {
   for (const child of [...content.children]) {
     content.remove(child);
-    if (child instanceof Mesh) {
+    if (child instanceof InstancedMesh || child instanceof Mesh) {
       child.geometry.dispose();
       const mat = child.material;
       if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
