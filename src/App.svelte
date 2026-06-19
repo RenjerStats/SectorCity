@@ -1,11 +1,13 @@
 <script lang="ts">
+  import Scene from "./lib/components/Scene.svelte";
   import { appMode } from "./lib/store/mode";
 
-  // Заглушка фазы 0: показываем текущий режим из единого стора.
-  // 3D-слой (Three.js) и DOM-обвязка будут общаться ТОЛЬКО через стор —
+  // Фаза 0: 3D-слой (Three.js) и DOM-обвязка общаются ТОЛЬКО через стор —
   // прямых вызовов между ними нет (см. docs/SectorCity-tech.md §1).
   let mode = $derived($appMode);
 </script>
+
+<Scene />
 
 <main>
   <h1>SectorCity</h1>
@@ -22,6 +24,8 @@
     z-index: 1;
     padding: 2rem;
     max-width: 40rem;
+    /* Информационная панель не должна перехватывать управление камерой. */
+    pointer-events: none;
   }
   h1 {
     margin: 0 0 0.5rem;

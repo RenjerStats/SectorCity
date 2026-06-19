@@ -24,10 +24,3 @@ body {
   color: var(--fg);
   overflow: hidden;
 }
-
-/* Канвас 3D-города живёт под DOM-обвязкой и тянется на всё окно. */
-#scene-canvas {
-  position: fixed;
-  inset: 0;
-  display: block;
-}
