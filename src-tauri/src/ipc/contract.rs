@@ -69,4 +69,10 @@ pub struct ScanNode {
     pub child_count: u32,
     pub category: Category,
     pub flags: Vec<NodeFlag>,
+    /// Превью детей (вложенный treemap, +1 уровень). Заполняется ТОЛЬКО при
+    /// `get_level(depth > 1)` и только для папок (рекурсивно при `depth > 2`);
+    /// иначе пусто. Пустой вектор не сериализуется — payload не раздувается
+    /// на листьях и при `depth = 1` (см. docs §5.7, IPC «текущий уровень + превью»).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ScanNode>,
 }

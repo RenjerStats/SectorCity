@@ -67,4 +67,10 @@ export interface ScanNode {
   childCount: number;
   category: Category;
   flags: NodeFlag[];
+  /**
+   * Превью детей (вложенный treemap, +1 уровень). Присутствует ТОЛЬКО при
+   * `getLevel(depth > 1)` и только у папок (рекурсивно при `depth > 2`); иначе
+   * поле отсутствует (на бэке пустой вектор не сериализуется). Опционально.
+   */
+  children?: ScanNode[];
 }

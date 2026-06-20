@@ -2,9 +2,10 @@
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { Vector3 } from "three";
   import { createScene, type SceneHandle } from "../three/scene";
-  import { buildCity } from "../three/city";
+  import { createNavigator, type CityNavigator } from "../three/navigator";
+  import Legend from "./Legend.svelte";
+  import StatusOverlay from "./StatusOverlay.svelte";
   import {
     setupInteraction,
     type InteractionController,
@@ -31,8 +32,15 @@
   // императивно (в обход реактивности), контент тултипа — реактивно из стора.
   let canvas: HTMLCanvasElement;
   let handle: SceneHandle | undefined;
+  let nav: CityNavigator | undefined;
   let interaction: InteractionController | undefined;
   let tooltipEl = $state<HTMLDivElement | undefined>(undefined);
+
+  // Состояние центрального оверлея (приветствие/пусто/ошибка/отмена). Низко-
+  // частотное — обычный $state; "none" = город виден, оверлей не рисуется.
+  type StatusKind = "welcome" | "empty" | "error" | "cancelled" | "none";
+  let statusKind = $state<StatusKind>("none");
+  let statusErrors = $state(0);
 
   /** Топ-N зданий на уровень; хвост бэк сворачивает в «Прочее». */
   const TOP_N = 50;
@@ -51,21 +59,30 @@
     return seg.length > 0 ? seg[seg.length - 1] : path;
   }
 
-  /** Построить уровень `path` в сцене и сбросить наведение/обзор. */
-  async function showLevel(path: string): Promise<void> {
-    const nodes = await getLevel(path, TOP_N, 1);
-    if (handle) buildCity(handle.content, nodes);
+  /** Загрузить `path` как новый корень мира (старт/после скана/прыжок по крошке
+   * дальше чем на уровень). Возвращает число узлов (0 → пусто, нечего показывать). */
+  async function loadRoot(path: string): Promise<number> {
+    // depth=2: каждый район несёт превью своих детей → вложенный treemap + LOD.
+    const nodes = await getLevel(path, TOP_N, 2);
+    nav?.reset(nodes, path);
     interaction?.clearHover();
-    handle?.resetView();
+    return nodes.length;
   }
 
   onMount(() => {
     handle = createScene(canvas);
+    nav = createNavigator(handle);
 
     // Взаимодействие: наведение → стор (контент тултипа), клик по району → drill.
     interaction = setupInteraction(handle, {
       onHover: (node) => hoveredNode.set(node),
-      onDrill: (node, center) => void drill(node, center),
+      onDrill: (node) => void drill(node),
+    });
+
+    // LOD активного уровня: покадрово по позиции камеры (дёшево, переключение
+    // только на смене состояния). Навигатор знает, какой уровень активен.
+    const offLod = handle.onFrame(() => {
+      nav?.updateLOD();
     });
 
     // Позицию тултипа обновляем покадрово императивно (вне реконсиляции Svelte).
@@ -97,19 +114,25 @@
     currentRoot()
       .then(async (root) => {
         const target = root ?? "";
-        await showLevel(target);
+        await loadRoot(target);
         breadcrumbs.set([{ path: target, name: crumbName(target) }]);
         appMode.set({ kind: "idle", path: target });
+        // Нет снимка прошлого скана → за демо-городом показываем приветствие
+        // с приглашением выбрать реальную папку; после скана оно скрывается.
+        statusKind = root === null ? "welcome" : "none";
       })
       .catch((err) => {
         console.warn("стартовый уровень недоступен:", err);
         appMode.set({ kind: "idle", path: "" });
+        statusKind = "welcome";
       });
 
     return () => {
+      offLod();
       offFrame();
       unlisten?.();
       interaction?.dispose();
+      nav?.dispose();
       handle?.dispose();
       handle = undefined;
     };
@@ -120,6 +143,7 @@
     const root = await open({ directory: true, multiple: false });
     if (typeof root !== "string") return; // отмена диалога
 
+    statusKind = "none"; // прячем оверлей на время скана
     appMode.set({ kind: "scanning", progress: 0 });
     scanProgress.set({
       entries: 0,
@@ -131,32 +155,38 @@
     try {
       const completed = await startScan(root);
       if (completed) {
-        await showLevel(root);
+        const count = await loadRoot(root);
         breadcrumbs.set([{ path: root, name: crumbName(root) }]);
         appMode.set({ kind: "idle", path: root });
+        // Пустой корень (нет файлов) → оверлей «папка пуста», иначе город виден.
+        statusKind = count === 0 ? "empty" : "none";
       } else {
         appMode.set({ kind: "idle", path: "" }); // отменён — прежний город остаётся
+        statusKind = "cancelled";
       }
     } catch (err) {
       console.error("скан не удался:", err);
       appMode.set({ kind: "idle", path: "" });
+      statusErrors = $scanProgress?.errors ?? 0;
+      statusKind = "error";
     } finally {
       scanProgress.set(null);
     }
   }
 
-  /** Клик по району: зум камеры к нему, затем коммит нового уровня + крошка. */
-  async function drill(node: ScanNode, center: Vector3) {
-    if ($appMode.kind === "zooming" || !handle) return;
+  /** Клик по району: бесшовный зум (промоут превью), затем крошка. Геометрию,
+   * камеру и origin shift считает навигатор — здесь только данные + крошки. */
+  async function drill(node: ScanNode) {
+    if ($appMode.kind === "zooming" || !nav) return;
     const from = $appMode.kind === "idle" ? $appMode.path : "";
     appMode.set({ kind: "zooming", from, to: node.path });
     hoveredNode.set(null);
 
-    // Зум камеры «внутрь» района (вид свернётся в новый город по прилёте).
-    const camPos = new Vector3(center.x, 70, center.z + 90);
-    await handle.flyTo(camPos, center, DRILL_MS);
+    // Дети района (превью +1) — это содержимое нового активного уровня.
+    const childNodes = await getLevel(node.path, TOP_N, 2);
+    await nav.drill(node, childNodes, DRILL_MS);
+    interaction?.clearHover();
 
-    await showLevel(node.path);
     breadcrumbs.set([
       ...$breadcrumbs,
       { path: node.path, name: node.name || crumbName(node.path) },
@@ -164,14 +194,22 @@
     appMode.set({ kind: "idle", path: node.path });
   }
 
-  /** Перейти к крошке по индексу (срезает стек, перестраивает уровень). */
+  /** Перейти к крошке по индексу. Подъём ровно на родителя — бесшовный (промоут
+   * декора); прыжок дальше — обычная пересборка уровня (origin сбрасывается). */
   async function goToCrumb(index: number) {
-    if ($appMode.kind === "zooming") return;
+    if ($appMode.kind === "zooming" || !nav) return;
     const crumb = $breadcrumbs[index];
     if (!crumb || index === $breadcrumbs.length - 1) return;
     appMode.set({ kind: "zooming", from: "", to: crumb.path });
     hoveredNode.set(null);
-    await showLevel(crumb.path);
+
+    if (index === $breadcrumbs.length - 2 && nav.canUp(crumb.path)) {
+      await nav.up(DRILL_MS);
+    } else {
+      await loadRoot(crumb.path);
+    }
+    interaction?.clearHover();
+
     breadcrumbs.set($breadcrumbs.slice(0, index + 1));
     appMode.set({ kind: "idle", path: crumb.path });
   }
@@ -227,6 +265,16 @@
     </div>
   {/if}
 
+  <!-- Легенда кодирования (высота=устаревание, цвет=категория). DOM-оверлей,
+       читает только палитру; во время скана прячем, чтобы не мешать прогрессу. -->
+  {#if !busy}
+    <Legend />
+  {/if}
+
+  <!-- Центральный оверлей состояний (приветствие/пусто/ошибка/отмена). Сам
+       рисует пустоту при "none"; кнопка запускает тот же scanFolder. -->
+  <StatusOverlay kind={statusKind} errors={statusErrors} onScan={scanFolder} />
+
   {#if hovered}
     <div class="tooltip" bind:this={tooltipEl}>
       <strong class="name">{hovered.name}</strong>
@@ -239,6 +287,9 @@
         <div class="muted">
           {hovered.childCount.toLocaleString("ru")} элементов
         </div>
+      {/if}
+      {#if hovered.flags.includes("cleanupCandidate")}
+        <div class="cleanup">⚑ кандидат на очистку</div>
       {/if}
       <div class="path">{hovered.path}</div>
     </div>
@@ -363,6 +414,11 @@
   }
   .tooltip .cat {
     color: var(--muted, #8b929c);
+  }
+  .tooltip .cleanup {
+    margin-top: 0.15rem;
+    color: #f2c14e;
+    font-size: 0.8rem;
   }
   .tooltip .muted {
     color: var(--muted, #8b929c);

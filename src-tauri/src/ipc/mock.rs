@@ -20,6 +20,8 @@ struct MockSpec {
     age_days: i64,
     child_count: u32,
     category: Category,
+    /// Кандидат на очистку — для демонстрации маркера без реального скана.
+    is_cleanup: bool,
 }
 
 /// Фиксированный набор узлов «корневого» уровня для фазы 0.
@@ -31,6 +33,7 @@ const SPECS: &[MockSpec] = &[
         age_days: 12,
         child_count: 24,
         category: Category::Binary,
+        is_cleanup: false,
     },
     MockSpec {
         name: "Program Files",
@@ -39,6 +42,7 @@ const SPECS: &[MockSpec] = &[
         age_days: 40,
         child_count: 31,
         category: Category::Binary,
+        is_cleanup: false,
     },
     MockSpec {
         name: "Users",
@@ -47,6 +51,7 @@ const SPECS: &[MockSpec] = &[
         age_days: 3,
         child_count: 8,
         category: Category::Document,
+        is_cleanup: false,
     },
     MockSpec {
         name: "projects",
@@ -55,6 +60,7 @@ const SPECS: &[MockSpec] = &[
         age_days: 1,
         child_count: 47,
         category: Category::Code,
+        is_cleanup: false,
     },
     MockSpec {
         name: "media",
@@ -63,6 +69,7 @@ const SPECS: &[MockSpec] = &[
         age_days: 90,
         child_count: 6,
         category: Category::Video,
+        is_cleanup: false,
     },
     MockSpec {
         name: "photos",
@@ -71,6 +78,7 @@ const SPECS: &[MockSpec] = &[
         age_days: 220,
         child_count: 14,
         category: Category::Image,
+        is_cleanup: false,
     },
     MockSpec {
         name: "music",
@@ -79,6 +87,7 @@ const SPECS: &[MockSpec] = &[
         age_days: 365,
         child_count: 11,
         category: Category::Audio,
+        is_cleanup: false,
     },
     MockSpec {
         name: "backups.zip",
@@ -87,6 +96,7 @@ const SPECS: &[MockSpec] = &[
         age_days: 730,
         child_count: 0,
         category: Category::Archive,
+        is_cleanup: false,
     },
     MockSpec {
         name: "install.iso",
@@ -95,6 +105,17 @@ const SPECS: &[MockSpec] = &[
         age_days: 500,
         child_count: 0,
         category: Category::Binary,
+        is_cleanup: false,
+    },
+    // Корзина на корне диска — кандидат на очистку (демонстрирует маркер).
+    MockSpec {
+        name: "$Recycle.Bin",
+        is_dir: true,
+        size: 6_100_000_000,
+        age_days: 150,
+        child_count: 3,
+        category: Category::Other,
+        is_cleanup: true,
     },
     MockSpec {
         name: "Прочее",
@@ -103,6 +124,7 @@ const SPECS: &[MockSpec] = &[
         age_days: 300,
         child_count: 0,
         category: Category::Other,
+        is_cleanup: false,
     },
 ];
 
@@ -121,11 +143,13 @@ pub fn mock_level(root: &str) -> Vec<ScanNode> {
                 format!("{base}/{}", spec.name)
             };
             let mtime = BASE_MTIME - spec.age_days * SECONDS_PER_DAY;
-            let flags = if spec.name == "Прочее" {
-                vec![NodeFlag::Aggregated]
-            } else {
-                Vec::new()
-            };
+            let mut flags = Vec::new();
+            if spec.name == "Прочее" {
+                flags.push(NodeFlag::Aggregated);
+            }
+            if spec.is_cleanup {
+                flags.push(NodeFlag::CleanupCandidate);
+            }
             ScanNode {
                 path,
                 name: spec.name.to_string(),
@@ -137,6 +161,8 @@ pub fn mock_level(root: &str) -> Vec<ScanNode> {
                 child_count: spec.child_count,
                 category: spec.category,
                 flags,
+                // Мок плоский: реальные дети (и превью depth>1) придут со сканером.
+                children: Vec::new(),
             }
         })
         .collect()

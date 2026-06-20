@@ -85,29 +85,58 @@ impl ScanTree {
         self.by_path.get(path).copied()
     }
 
-    /// Дети узла `path`, отсортированные по размеру (убывание), с tail-агрегацией:
-    /// первые `top_n` отдаются как есть, хвост сворачивается в синтетический узел
-    /// «Прочее» с честной суммой площади (флаг `Aggregated`). `top_n == 0` —
-    /// без агрегации, отдать всех детей.
+    /// Дети уровня `path` с tail-агрегацией и превью на `depth` уровней вниз.
     ///
-    /// Наружу уходит только текущий уровень (см. docs §IPC) — превью +depth
-    /// добавим отдельным куском (фаза 2).
-    pub fn level(&self, path: &str, top_n: usize) -> Vec<ScanNode> {
+    /// Прямые дети сортируются по размеру (убывание); первые `top_n` отдаются как
+    /// есть, хвост сворачивается в синтетический узел «Прочее» честной суммарной
+    /// площади (флаг `Aggregated`). `top_n == 0` — без агрегации, отдать всех.
+    ///
+    /// При `depth > 1` каждый дочерний РАЙОН (папка) дополнительно получает превью
+    /// своих детей — вложенный treemap ещё на уровень вниз (ТЗ §3, «очертания до
+    /// открытия»); рекурсия идёт до `depth == 1`. Наружу уходит «текущий уровень +
+    /// превью», уже агрегированный по хвосту на каждом уровне (docs §IPC, §5.7).
+    pub fn level(&self, path: &str, top_n: usize, depth: u32) -> Vec<ScanNode> {
         let Some(idx) = self.index_of(path) else {
             return Vec::new();
         };
+        self.children_of(idx, top_n, depth)
+    }
+
+    /// Дети узла `idx` (top-N + «Прочее»); папки при `depth > 1` несут превью.
+    fn children_of(&self, idx: usize, top_n: usize, depth: u32) -> Vec<ScanNode> {
         let mut kids = self.nodes[idx].children.clone();
         kids.sort_by(|&a, &b| self.nodes[b].size.cmp(&self.nodes[a].size));
 
-        if top_n == 0 || kids.len() <= top_n {
-            return kids.into_iter().map(|k| self.to_contract(k)).collect();
+        // `top_n == 0` или мало детей → без хвоста; иначе режем на head/tail.
+        let split = if top_n == 0 || kids.len() <= top_n {
+            kids.len()
+        } else {
+            top_n
+        };
+        let (head, tail) = kids.split_at(split);
+
+        let mut out: Vec<ScanNode> = head
+            .iter()
+            .map(|&k| self.node_with_preview(k, top_n, depth))
+            .collect();
+        if !tail.is_empty() {
+            out.push(self.aggregate_tail(idx, tail));
         }
+        out
+    }
 
-        let (head, tail) = kids.split_at(top_n);
-        let mut out: Vec<ScanNode> = head.iter().map(|&k| self.to_contract(k)).collect();
+    /// Узел `idx` в контракт; при `depth > 1` для непустой папки — с превью детей.
+    fn node_with_preview(&self, idx: usize, top_n: usize, depth: u32) -> ScanNode {
+        let mut node = self.to_contract(idx);
+        if depth > 1 && self.nodes[idx].is_dir && !self.nodes[idx].children.is_empty() {
+            node.children = self.children_of(idx, top_n, depth - 1);
+        }
+        node
+    }
 
-        // Свернуть хвост в «Прочее»: площадь = честная сумма, высоту кодируем
-        // самым старым mtime хвоста (устаревание «вверх»).
+    /// Свернуть хвост детей узла `parent` в синтетический узел «Прочее»: площадь =
+    /// честная сумма, высоту кодируем самым старым mtime хвоста (устаревание «вверх»).
+    fn aggregate_tail(&self, parent: usize, tail: &[usize]) -> ScanNode {
         let mut sum = 0u64;
         let mut oldest = i64::MAX;
         for &k in tail {
@@ -115,20 +144,20 @@ impl ScanTree {
             sum += n.size;
             oldest = oldest.min(n.mtime);
         }
-        let count = tail.len() as u32;
-        out.push(ScanNode {
+        let parent_path = self.nodes[parent].path.to_string_lossy();
+        ScanNode {
             // Синтетический путь: не навигируется (узел агрегированный).
-            path: format!("{path}::<other>"),
+            path: format!("{parent_path}::<other>"),
             name: "Прочее".to_string(),
             is_dir: false,
             size: sum,
             mtime: if oldest == i64::MAX { 0 } else { oldest },
             atime: if oldest == i64::MAX { 0 } else { oldest },
-            child_count: count,
+            child_count: tail.len() as u32,
             category: Category::Other,
             flags: vec![NodeFlag::Aggregated],
-        });
-        out
+            children: Vec::new(),
+        }
     }
 
     /// Перевести узел арены в контракт IPC (`ScanNode`).
@@ -152,6 +181,8 @@ impl ScanTree {
             child_count: n.child_count,
             category: n.category,
             flags,
+            // Превью заполняет `node_with_preview` при depth > 1; здесь — пусто.
+            children: Vec::new(),
         }
     }
 }
@@ -492,6 +523,74 @@ mod tests {
             .expect("узел sub");
         assert_eq!(sub_node.size, 75);
         assert_eq!(sub_node.child_count, 2);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn level_preview_depth_populates_only_at_depth_2() {
+        let root = temp_dir("preview");
+        // root/a.bin = 100 (файл), root/sub/{b=50, c=25} (папка с двумя детьми).
+        write_file(&root.join("a.bin"), 100);
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        write_file(&sub.join("b.bin"), 50);
+        write_file(&sub.join("c.bin"), 25);
+
+        let tree = scan_root(&root).unwrap();
+        let root_path = tree.root_node().path.to_string_lossy().into_owned();
+
+        // depth = 1: превью нет даже у папки.
+        let flat = tree.level(&root_path, 0, 1);
+        let sub_flat = flat
+            .iter()
+            .find(|n| n.name == "sub")
+            .expect("sub в depth=1");
+        assert!(
+            sub_flat.children.is_empty(),
+            "depth=1 не должен нести превью детей"
+        );
+
+        // depth = 2: папка sub несёт превью своих детей (b.bin, c.bin); файл a.bin — нет.
+        let nested = tree.level(&root_path, 0, 2);
+        let sub_nested = nested
+            .iter()
+            .find(|n| n.name == "sub")
+            .expect("sub в depth=2");
+        assert_eq!(sub_nested.children.len(), 2, "превью детей sub");
+        // Превью отсортировано по размеру: b (50) раньше c (25).
+        assert_eq!(sub_nested.children[0].name, "b.bin");
+        assert_eq!(sub_nested.children[1].name, "c.bin");
+        // Дети превью сами превью не несут (рекурсия остановилась на depth=1).
+        assert!(sub_nested.children[0].children.is_empty());
+
+        let a_nested = nested.iter().find(|n| n.name == "a.bin").expect("a.bin");
+        assert!(a_nested.children.is_empty(), "у файла превью нет");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn level_tail_aggregates_into_other() {
+        let root = temp_dir("tail");
+        // Четыре файла разного размера; top_n = 2 → два крупнейших + «Прочее».
+        write_file(&root.join("big1.bin"), 100);
+        write_file(&root.join("big2.bin"), 80);
+        write_file(&root.join("small1.bin"), 10);
+        write_file(&root.join("small2.bin"), 5);
+
+        let tree = scan_root(&root).unwrap();
+        let root_path = tree.root_node().path.to_string_lossy().into_owned();
+
+        let level = tree.level(&root_path, 2, 1);
+        assert_eq!(level.len(), 3, "2 крупнейших + «Прочее»");
+        assert_eq!(level[0].name, "big1.bin");
+        assert_eq!(level[1].name, "big2.bin");
+
+        let other = &level[2];
+        assert!(other.flags.contains(&NodeFlag::Aggregated));
+        assert_eq!(other.size, 15, "честная сумма хвоста");
+        assert_eq!(other.child_count, 2);
 
         fs::remove_dir_all(&root).ok();
     }

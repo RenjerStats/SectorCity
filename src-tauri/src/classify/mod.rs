@@ -78,4 +78,13 @@ mod tests {
         assert!(is_cleanup_dir("__pycache__"));
         assert!(!is_cleanup_dir("src"));
     }
+
+    #[test]
+    fn detects_recycle_bin() {
+        // Корзина Windows в корне диска — точное имя с учётом регистра.
+        assert!(is_cleanup_dir("$Recycle.Bin"));
+        assert!(is_cleanup_dir("$RECYCLE.BIN"));
+        assert!(is_cleanup_dir(".Trash"));
+        assert!(!is_cleanup_dir("Recycle"));
+    }
 }

@@ -117,8 +117,10 @@ pub fn cancel_scan(state: State<'_, AppState>) -> AppResult<()> {
     Ok(())
 }
 
-/// Дети уровня `path` + tail-агрегация в «Прочее». До первого скана отдаём мок
-/// (сквозной поток фазы 0 продолжает работать без выбора реальной папки).
+/// Дети уровня `path` + tail-агрегация в «Прочее», с превью на `depth` уровней
+/// вниз (`depth > 1` → папки несут вложенный treemap своих детей; см.
+/// `ScanTree::level`). До первого скана отдаём мок (плоский, превью нет —
+/// сквозной поток фазы 0 продолжает работать без выбора реальной папки).
 #[tauri::command]
 pub async fn get_level(
     path: String,
@@ -129,7 +131,7 @@ pub async fn get_level(
     tracing::info!(%path, top_n, depth, "get_level");
     let guard = state.scan.lock().unwrap();
     match guard.as_ref() {
-        Some(tree) => Ok(tree.level(&path, top_n as usize)),
+        Some(tree) => Ok(tree.level(&path, top_n as usize, depth)),
         None => Ok(super::mock::mock_level(&path)),
     }
 }

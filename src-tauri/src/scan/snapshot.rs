@@ -264,8 +264,8 @@ mod tests {
         // Запрос уровня из загруженного дерева совпадает по количеству детей.
         let root_path = tree.root_node().path.to_string_lossy().into_owned();
         assert_eq!(
-            loaded.level(&root_path, 0).len(),
-            tree.level(&root_path, 0).len()
+            loaded.level(&root_path, 0, 1).len(),
+            tree.level(&root_path, 0, 1).len()
         );
 
         std::fs::remove_file(&db).ok();

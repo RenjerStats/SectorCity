@@ -21,6 +21,7 @@ import {
 } from "three";
 import { MapControls } from "three/examples/jsm/controls/MapControls.js";
 import { Easing, Group as TweenGroup, Tween } from "@tweenjs/tween.js";
+import { INITIAL_CAMERA_POS, INITIAL_TARGET } from "./home";
 
 /** Ручка управления сценой для владельца (Svelte-компонента) и слоёв. */
 export interface SceneHandle {
@@ -34,8 +35,20 @@ export interface SceneHandle {
   add(object: Object3D): void;
   /** Зарегистрировать покадровый колбэк; возвращает функцию отписки. */
   onFrame(cb: () => void): () => void;
-  /** Плавно перевести камеру (позиция + цель) за `ms`. Резолвится по прилёте. */
-  flyTo(position: Vector3, target: Vector3, ms: number): Promise<void>;
+  /**
+   * Плавно перевести камеру (позиция + цель) за `ms`. Резолвится по прилёте.
+   * `onArrive` (если задан) вызывается СИНХРОННО в кадре завершения, до повторного
+   * включения контролов и резолва — туда навигатор кладёт rebase (origin shift),
+   * чтобы нормировка координат прошла без видимого кадра «до».
+   */
+  flyTo(
+    position: Vector3,
+    target: Vector3,
+    ms: number,
+    onArrive?: () => void,
+  ): Promise<void>;
+  /** Жёстко поставить камеру (позиция + цель) и обновить контролы. */
+  placeCamera(position: Vector3, target: Vector3): void;
   /** Спроецировать мировую точку в пиксели canvas; `visible` — точка перед камерой. */
   worldToScreen(v: Vector3): { x: number; y: number; visible: boolean };
   /** Вернуть камеру в исходный обзорный ракурс. */
@@ -43,10 +56,6 @@ export interface SceneHandle {
   /** Освободить GPU-ресурсы и снять слушатели. Вызывать при размонтировании. */
   dispose(): void;
 }
-
-/** Исходный ракурс камеры — обзор города под лёгким наклоном. */
-const INITIAL_CAMERA_POS = new Vector3(0, 140, 180);
-const INITIAL_TARGET = new Vector3(0, 0, 0);
 
 /**
  * Поднять сцену в переданном `<canvas>`. Возвращает ручку управления;
@@ -59,7 +68,9 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
   const scene = new Scene();
   scene.background = new Color(0x0e0f13);
 
-  const camera = new PerspectiveCamera(50, 1, 0.1, 5000);
+  // far большой: декор (родительский уровень) после origin shift раздут в 1/s и
+  // выглядывает по краям холста — он должен оставаться в пределах отсечения.
+  const camera = new PerspectiveCamera(50, 1, 0.1, 20000);
   camera.position.copy(INITIAL_CAMERA_POS);
 
   // Свет: мягкая заливка + направленный, чтобы читались грани зданий.
@@ -122,7 +133,7 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
       frameCallbacks.add(cb);
       return () => frameCallbacks.delete(cb);
     },
-    flyTo(position, target, ms) {
+    flyTo(position, target, ms, onArrive) {
       return new Promise((resolve) => {
         // На время перелёта глушим пользовательский ввод, чтобы не драться с твином.
         controls.enabled = false;
@@ -137,11 +148,19 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
             controls.target.lerpVectors(tgtFrom, target, t.p);
           })
           .onComplete(() => {
+            // rebase идёт ДО повторного включения контролов и резолва, в этом же
+            // кадре — следующий render уже нормированный (origin shift невидим).
+            onArrive?.();
             controls.enabled = true;
             resolve();
           })
           .start();
       });
+    },
+    placeCamera(position, target) {
+      camera.position.copy(position);
+      controls.target.copy(target);
+      controls.update();
     },
     worldToScreen(v) {
       const p = v.clone().project(camera);

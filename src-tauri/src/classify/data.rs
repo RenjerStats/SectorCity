@@ -193,12 +193,16 @@ pub const EXTENSION_CATEGORY: &[(&str, Category)] = &[
 /// Имена каталогов, которые обычно являются кэшем/мусором (кандидаты на очистку).
 /// Имена сравниваются по точному совпадению имени каталога в нижнем регистре.
 pub const CLEANUP_DIR_NAMES: &[&str] = &[
+    // Корзины ОС (в корне каждого диска Windows; `.trash` — задел под *nix).
+    // Подпапки с UID (`.trash-1000`) пока не ловим — нужен префиксный матч.
+    "$recycle.bin",
     ".cache",
     ".gradle",
     ".idea",
     ".ipynb_checkpoints",
     ".pytest_cache",
     ".sass-cache",
+    ".trash",
     ".turbo",
     ".venv",
     ".vs",

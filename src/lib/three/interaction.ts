@@ -3,9 +3,11 @@
  * (highlight-mesh) и клик-drill по районам. Императивная часть 3D-мира.
  *
  * Архитектура (docs §1, §5): picking — CPU raycast с rAF-троттлингом (обработка
- * не чаще кадра). Обводка одного инстанса `InstancedMesh` через OutlinePass
- * невозможна — держим ОДИН отдельный highlight-mesh (рёбра бокса) и ставим его
- * трансформ = матрице наведённого инстанса (docs §5.1).
+ * не чаще кадра). Raycast идёт по нескольким `InstancedMesh` уровня (здания,
+ * плоты, силуэты районов — `CityView.pickMeshes`); попадание разрешается в узел и
+ * цель drill через `CityView.resolvePick`. Обводка одного инстанса через
+ * OutlinePass невозможна — держим ОДИН highlight-mesh (рёбра бокса) и ставим его
+ * трансформ = матрице наведённого инстанса того меша, в который попали (docs §5.1).
  *
  * Контакт с DOM — только через колбэки, которые владелец заворачивает в стор.
  * Прямой связи raycaster ↔ DOM нет.
@@ -13,6 +15,7 @@
 import {
   BoxGeometry,
   EdgesGeometry,
+  type InstancedMesh,
   LineBasicMaterial,
   LineSegments,
   Matrix4,
@@ -23,14 +26,14 @@ import {
 } from "three";
 import type { ScanNode } from "../ipc/contract";
 import type { SceneHandle } from "./scene";
-import { getCityMesh } from "./city";
+import { activeView, isInteractive } from "./navigator";
 
 /** Колбэки наружу: владелец заворачивает их в стор / машину режимов. */
 export interface InteractionCallbacks {
   /** Наведение сменилось (узел или `null`, когда курсор ушёл со зданий). */
   onHover(node: ScanNode | null): void;
-  /** Клик по району (папке) → drill. `center` — мировой центр основания. */
-  onDrill(node: ScanNode, center: Vector3): void;
+  /** Клик по району (папке) → drill (бесшовный зум считает навигатор сам). */
+  onDrill(node: ScanNode): void;
 }
 
 /** Управление слоем взаимодействия. */
@@ -46,6 +49,12 @@ export interface InteractionController {
 /** Порог в пикселях: смещение больше — это перетаскивание камеры, не клик. */
 const CLICK_SLOP = 5;
 
+/** Попадание raycast: меш уровня + индекс инстанса в нём. */
+interface Hit {
+  mesh: InstancedMesh;
+  id: number;
+}
+
 export function setupInteraction(
   handle: SceneHandle,
   cb: InteractionCallbacks,
@@ -54,7 +63,7 @@ export function setupInteraction(
   const pointer = new Vector2();
   let pointerInside = false;
   let dirty = false; // указатель сдвинулся — нужен пересчёт на следующем кадре
-  let hoveredId: number | null = null;
+  let hovered: Hit | null = null;
   let down: { x: number; y: number } | null = null;
 
   // Один highlight-mesh: рёбра единичного бокса, трансформ = матрица инстанса.
@@ -72,45 +81,50 @@ export function setupInteraction(
   const quat = new Quaternion();
   const grow = new Vector3(1.015, 1.015, 1.015); // чуть крупнее — без z-fight
 
-  function meshAndNodes() {
-    const mesh = getCityMesh(handle.content);
-    const nodes = mesh?.userData.nodes as ScanNode[] | undefined;
-    return mesh && nodes ? { mesh, nodes } : null;
-  }
-
-  function raycastInstance(): number | null {
-    const mn = meshAndNodes();
-    if (!mn) return null;
+  /** Ближайшее попадание по мешам активного уровня, либо `null`. */
+  function raycastHit(): Hit | null {
+    const view = activeView(handle.content);
+    if (!view) return null;
+    const meshes = view.pickMeshes();
+    if (meshes.length === 0) return null;
     raycaster.setFromCamera(pointer, handle.camera);
-    const hits = raycaster.intersectObject(mn.mesh);
-    return hits.length > 0 ? (hits[0].instanceId ?? null) : null;
+    const hits = raycaster.intersectObjects(meshes, false);
+    for (const h of hits) {
+      // Скрытые LOD-инстансы (scale=0) вырождены и не дают пересечения; первое
+      // попадание уже ближайшее (intersectObjects сортирует по дистанции).
+      if (h.instanceId != null) {
+        return { mesh: h.object as InstancedMesh, id: h.instanceId };
+      }
+    }
+    return null;
   }
 
-  function applyHighlight(id: number): void {
-    const mn = meshAndNodes();
-    if (!mn) {
-      highlight.visible = false;
-      return;
-    }
-    mn.mesh.getMatrixAt(id, m);
+  /** Поставить обводку на инстанс `id` меша `mesh`. */
+  function applyHighlight(hit: Hit): void {
+    hit.mesh.getMatrixAt(hit.id, m);
     highlight.matrix.copy(m).scale(grow);
     highlight.visible = true;
   }
 
-  function setHover(id: number | null): void {
-    if (id === hoveredId) {
-      if (id !== null) applyHighlight(id); // камера могла сдвинуться — освежить
+  /** Два попадания указывают на один и тот же инстанс? */
+  function sameHit(a: Hit | null, b: Hit | null): boolean {
+    return a === b || (!!a && !!b && a.mesh === b.mesh && a.id === b.id);
+  }
+
+  function setHover(hit: Hit | null): void {
+    if (sameHit(hit, hovered)) {
+      if (hit) applyHighlight(hit); // камера могла сдвинуться — освежить
       return;
     }
-    hoveredId = id;
-    const mn = meshAndNodes();
-    if (id === null || !mn) {
+    hovered = hit;
+    const view = activeView(handle.content);
+    if (!hit || !view) {
       highlight.visible = false;
       cb.onHover(null);
       return;
     }
-    applyHighlight(id);
-    cb.onHover(mn.nodes[id] ?? null);
+    applyHighlight(hit);
+    cb.onHover(view.resolvePick(hit.mesh, hit.id)?.node ?? null);
   }
 
   // rAF-троттлинг: тяжёлый raycast делаем максимум раз в кадр и только если
@@ -118,7 +132,9 @@ export function setupInteraction(
   const offFrame = handle.onFrame(() => {
     if (!dirty) return;
     dirty = false;
-    setHover(pointerInside ? raycastInstance() : null);
+    // Во время твина зума (origin shift не завершён) пикинг выключен.
+    const live = pointerInside && isInteractive(handle.content);
+    setHover(live ? raycastHit() : null);
   });
 
   function toNdc(e: PointerEvent): void {
@@ -148,18 +164,18 @@ export function setupInteraction(
   }
 
   function pick(): void {
-    const mn = meshAndNodes();
-    if (!mn) return;
-    const id = hoveredId ?? raycastInstance();
-    if (id === null) return;
-    const node = mn.nodes[id];
-    if (!node) return;
+    if (!isInteractive(handle.content)) return; // твин зума ещё идёт
+    const view = activeView(handle.content);
+    if (!view) return;
+    const hit = hovered ?? raycastHit();
+    if (!hit) return;
+    const info = view.resolvePick(hit.mesh, hit.id);
+    if (!info) return;
     // Drill только в реальные папки. Агрегированное «Прочее» и файлы — не районы.
-    const aggregated = node.flags.includes("aggregated");
-    if (node.isDir && !aggregated) {
-      mn.mesh.getMatrixAt(id, m);
-      m.decompose(pos, quat, scale);
-      cb.onDrill(node, new Vector3(pos.x, 0, pos.z));
+    // Цель — drillTarget: для вложенного превью это родительский район.
+    const t = info.drillTarget;
+    if (t.isDir && !t.flags.includes("aggregated")) {
+      cb.onDrill(t);
     }
   }
 
@@ -171,15 +187,13 @@ export function setupInteraction(
 
   return {
     hoverAnchor() {
-      if (hoveredId === null) return null;
-      const mn = meshAndNodes();
-      if (!mn) return null;
-      mn.mesh.getMatrixAt(hoveredId, m);
+      if (!hovered) return null;
+      hovered.mesh.getMatrixAt(hovered.id, m);
       m.decompose(pos, quat, scale);
       return new Vector3(pos.x, pos.y + scale.y / 2, pos.z);
     },
     clearHover() {
-      hoveredId = null;
+      hovered = null;
       highlight.visible = false;
       cb.onHover(null);
     },
