@@ -10,8 +10,9 @@
  * Фикс: `setDecor(excludePath)` скрывает силуэт именно этого района.
  */
 import { describe, expect, it } from "vitest";
-import { PerspectiveCamera } from "three";
+import { Color, PerspectiveCamera } from "three";
 import { buildLevel, CITY_SPAN } from "./city";
+import { DISTRICT_PLOT_COLOR } from "./palette";
 import {
   dir,
   file,
@@ -83,10 +84,11 @@ describe("buildLevel + LOD", () => {
 });
 
 describe("setDecor (фикс окклюзии) / setActive", () => {
-  it("setDecor(excludePath) скрывает силуэт ставшего активным района, прочие видны", () => {
+  it("setDecor(excludePath) скрывает вложенный район, а прочие папки раскрывает как декор", () => {
     const level = buildLevel(rootNodes(), SPAN, "root");
-    // Захватываем coarse-меш ПОКА уровень активен (в декоре pickMeshes() пуст).
-    const coarse = level.view.pickMeshes()[2];
+    const meshes = level.view.pickMeshes();
+    const coarse = meshes[2];
+    const plot = meshes[1];
 
     const pa = level.childPlacement("/a")!;
     const pb = level.childPlacement("/b")!;
@@ -95,10 +97,14 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
 
     level.setDecor("/a");
 
-    // Регрессия: силуэт /a (он стал активным уровнем) ОБЯЗАН быть скрыт…
+    // Исключённый район /a (ставший активным) полностью скрыт на всех мешах:
     expect(isHidden(matrixAt(coarse, idxA))).toBe(true);
-    // …а соседний район /b остаётся силуэтом-контекстом.
-    expect(isHidden(matrixAt(coarse, idxB))).toBe(false);
+    expect(isHidden(matrixAt(plot, idxA))).toBe(true);
+
+    // А соседний район /b раскрыт (силуэт скрыт, но plot виден):
+    expect(isHidden(matrixAt(coarse, idxB))).toBe(true);
+    expect(isHidden(matrixAt(plot, idxB))).toBe(false);
+
     // Декор не кликабелен.
     expect(level.view.pickMeshes()).toEqual([]);
 
@@ -121,4 +127,57 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
 
     level.dispose();
   });
+
+  it("папки на превью (depth 2) окрашиваются в DISTRICT_PLOT_COLOR", () => {
+    const nodes = [
+      dir("/a", [
+        dir("/a/sub", [file("/a/sub/1", 100, "code")])
+      ])
+    ];
+    const level = buildLevel(nodes, SPAN, "root");
+    const building = level.view.pickMeshes()[0]; // buildingMesh
+
+    let subIdx: number | null = null;
+    for (let i = 0; i < building.count; i++) {
+      const info = level.view.resolvePick(building, i);
+      if (info && info.node.path === "/a/sub") {
+        subIdx = i;
+        break;
+      }
+    }
+    expect(subIdx).not.toBeNull();
+
+    const col = new Color();
+    building.getColorAt(subIdx!, col);
+    expect(col.getHex()).toBe(DISTRICT_PLOT_COLOR);
+    level.dispose();
+  });
+
+  it("в режиме decor buildingMesh и plotMesh остаются видимыми, но приглушаются цветом (не полупрозрачные)", () => {
+    const level = buildLevel(rootNodes(), SPAN, "root");
+    const meshes = level.view.pickMeshes();
+    const building = meshes[0];
+    const plot = meshes[1];
+
+    level.setDecor("/a");
+
+    expect(building.visible).toBe(true);
+    expect(plot.visible).toBe(true);
+
+    const buildMat = building.material as any;
+    expect(buildMat.transparent).toBe(false);
+    expect(buildMat.color.r).toBeCloseTo(0.35);
+    expect(buildMat.color.g).toBeCloseTo(0.35);
+    expect(buildMat.color.b).toBeCloseTo(0.35);
+
+    const plotMat = plot.material as any;
+    expect(plotMat.transparent).toBe(false);
+    const expectedPlotColor = new Color(DISTRICT_PLOT_COLOR).multiplyScalar(0.35);
+    expect(plotMat.color.r).toBeCloseTo(expectedPlotColor.r);
+    expect(plotMat.color.g).toBeCloseTo(expectedPlotColor.g);
+    expect(plotMat.color.b).toBeCloseTo(expectedPlotColor.b);
+
+    level.dispose();
+  });
 });
+

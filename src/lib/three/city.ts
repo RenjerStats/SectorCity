@@ -347,7 +347,8 @@ export function buildLevel(
       // Вложенные превью стартуют скрытыми (район далёкий → силуэт); файлы видны.
       const hidden = b.districtIdx !== null;
       buildingMesh!.setMatrixAt(i, hidden ? ZERO_MATRIX : dummy.matrix);
-      buildingMesh!.setColorAt(i, color.set(CATEGORY_COLOR[b.node.category]));
+      const nodeColor = b.node.isDir ? DISTRICT_PLOT_COLOR : CATEGORY_COLOR[b.node.category];
+      buildingMesh!.setColorAt(i, color.set(nodeColor));
 
       if (b.districtIdx !== null) lod[b.districtIdx].buildingIds.push(i);
 
@@ -493,29 +494,79 @@ export function buildLevel(
    * `excludedIdx` (ставшего активным уровнем) скрыт — иначе он накрыл бы активный. */
   function applyDecor(): void {
     ground.visible = false;
-    if (buildingMesh) buildingMesh.visible = false;
-    if (plotMesh) plotMesh.visible = false;
+    if (buildingMesh) {
+      buildingMesh.visible = true;
+      // Скрываем внутренние здания исключённого района (чтобы не перекрывали активный уровень),
+      // а все остальные здания (включая файлы родительского уровня) показываем.
+      buildings.forEach((b, i) => {
+        if (b.districtIdx === excludedIdx) {
+          buildingMesh!.setMatrixAt(i, ZERO_MATRIX);
+        } else {
+          buildingMesh!.setMatrixAt(i, buildingReal[i]);
+        }
+      });
+      buildingMesh.instanceMatrix.needsUpdate = true;
+
+      const mat = buildingMesh.material as MeshLambertMaterial;
+      mat.color.setRGB(0.35, 0.35, 0.35); // Притушенные цвета
+      mat.transparent = false;
+      mat.opacity = 1;
+      mat.depthWrite = true;
+    }
+
+    if (plotMesh) {
+      plotMesh.visible = true;
+      // Скрываем подложку исключённого района, остальные показываем.
+      for (let j = 0; j < plotReal.length; j++) {
+        plotMesh.setMatrixAt(j, j === excludedIdx ? ZERO_MATRIX : plotReal[j]);
+      }
+      plotMesh.instanceMatrix.needsUpdate = true;
+
+      const mat = plotMesh.material as MeshLambertMaterial;
+      mat.color.copy(new Color(DISTRICT_PLOT_COLOR).multiplyScalar(0.35));
+      mat.transparent = false;
+      mat.opacity = 1;
+      mat.depthWrite = true;
+    }
+
     if (markerMesh) markerMesh.visible = false;
+
     if (coarseMesh) {
-      // Все районы — силуэтами, без LOD-переключений (кроме скрытого активного).
+      // В режиме декорации все папки раскрыты, поэтому скрываем все их силуэты-блоки
       for (let j = 0; j < coarseReal.length; j++)
-        coarseMesh.setMatrixAt(j, j === excludedIdx ? ZERO_MATRIX : coarseReal[j]);
+        coarseMesh.setMatrixAt(j, ZERO_MATRIX);
       coarseMesh.instanceMatrix.needsUpdate = true;
       const mat = coarseMesh.material as MeshLambertMaterial;
-      mat.transparent = true;
-      mat.opacity = 0.4;
-      mat.depthWrite = false;
+      mat.color.copy(new Color(DISTRICT_PLOT_COLOR).multiplyScalar(0.35));
+      mat.transparent = false;
+      mat.opacity = 1;
+      mat.depthWrite = true;
     }
   }
 
   /** Вернуть активный облик: всё видимо, материал плотный, LOD снова работает. */
   function applyActive(): void {
     ground.visible = true;
-    if (buildingMesh) buildingMesh.visible = true;
-    if (plotMesh) plotMesh.visible = true;
+    if (buildingMesh) {
+      buildingMesh.visible = true;
+      const mat = buildingMesh.material as MeshLambertMaterial;
+      mat.color.setRGB(1, 1, 1); // Восстанавливаем оригинальные цвета
+      mat.transparent = false;
+      mat.opacity = 1;
+      mat.depthWrite = true;
+    }
+    if (plotMesh) {
+      plotMesh.visible = true;
+      const mat = plotMesh.material as MeshLambertMaterial;
+      mat.color.setHex(DISTRICT_PLOT_COLOR);
+      mat.transparent = false;
+      mat.opacity = 1;
+      mat.depthWrite = true;
+    }
     if (markerMesh) markerMesh.visible = true;
     if (coarseMesh) {
       const mat = coarseMesh.material as MeshLambertMaterial;
+      mat.color.setHex(DISTRICT_PLOT_COLOR);
       mat.transparent = false;
       mat.opacity = 1;
       mat.depthWrite = true;
@@ -533,9 +584,10 @@ export function buildLevel(
       plotMesh.instanceMatrix.needsUpdate = true;
     }
     if (buildingMesh) {
-      for (const d of lod)
-        for (const id of d.buildingIds)
-          buildingMesh.setMatrixAt(id, ZERO_MATRIX);
+      // Восстанавливаем файлы верхнего уровня и скрываем вложенные здания.
+      buildings.forEach((b, i) => {
+        buildingMesh!.setMatrixAt(i, b.districtIdx === null ? buildingReal[i] : ZERO_MATRIX);
+      });
       buildingMesh.instanceMatrix.needsUpdate = true;
     }
   }
