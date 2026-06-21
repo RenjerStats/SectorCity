@@ -8,6 +8,7 @@
   import StatusOverlay from "./StatusOverlay.svelte";
   import NodeCard from "./NodeCard.svelte";
   import FilterPanel from "./FilterPanel.svelte";
+  import SearchBox from "./SearchBox.svelte";
   import {
     setupInteraction,
     type InteractionController,
@@ -28,6 +29,7 @@
     selectedNode,
     breadcrumbs,
     candidateFilter,
+    searchQuery,
     type CandidateFilter,
   } from "../store/mode";
   import type { ScanNode, ScanProgress } from "../ipc/contract";
@@ -61,9 +63,10 @@
     return `${(bytes / 1e9).toFixed(2)} ГБ`;
   }
 
-  /** Построить предикат подсветки из фильтра; `null`, если критериев нет (подсветка
-   * снимается). Все условия — конъюнкция (см. `CandidateFilter`). */
-  function buildMatch(f: CandidateFilter): ((n: ScanNode) => boolean) | null {
+  /** Предикат фильтра кандидатов; `null`, если критериев нет. Конъюнкция условий. */
+  function filterPredicate(
+    f: CandidateFilter,
+  ): ((n: ScanNode) => boolean) | null {
     const on = f.onlyCandidates || f.minSize > 0 || f.olderThanDays > 0;
     if (!on) return null;
     const now = Date.now() / 1000;
@@ -75,6 +78,31 @@
       if (olderThan > 0 && now - n.mtime < olderThan) return false;
       return true;
     };
+  }
+
+  /** Объединённая подсветка: фильтр кандидатов И поиск по имени (конъюнкция).
+   * `null`, если ни фильтр, ни поиск не активны (подсветка снимается). */
+  function buildHighlight(
+    f: CandidateFilter,
+    q: string,
+  ): ((n: ScanNode) => boolean) | null {
+    const fp = filterPredicate(f);
+    const needle = q.trim().toLowerCase();
+    const hasSearch = needle.length > 0;
+    if (!fp && !hasSearch) return null;
+    return (n) => {
+      if (fp && !fp(n)) return false;
+      if (hasSearch && !n.name.toLowerCase().includes(needle)) return false;
+      return true;
+    };
+  }
+
+  /** Пересчитать подсветку из текущих сторов и отдать навигатору (он переживает
+   * навигацию). Зовётся при изменении фильтра ИЛИ поискового запроса. */
+  function refreshHighlight() {
+    nav?.applyHighlight(
+      buildHighlight(candidateFilter.get(), searchQuery.get()),
+    );
   }
 
   /** Имя уровня из пути для крошки (последний сегмент, или сам путь). */
@@ -140,11 +168,10 @@
     };
     window.addEventListener("keydown", onKey);
 
-    // Фильтр-подсветка: стор → предикат → навигатор (он переживает навигацию).
+    // Подсветка: фильтр кандидатов И поиск по имени → один предикат навигатору.
     // subscribe срабатывает сразу с текущим значением — nav уже создан выше.
-    const offFilter = candidateFilter.subscribe((f) => {
-      nav?.applyHighlight(buildMatch(f));
-    });
+    const offFilter = candidateFilter.subscribe(() => refreshHighlight());
+    const offSearch = searchQuery.subscribe(() => refreshHighlight());
 
     // Стрим прогресса скана с бэка (троттлинг там же) → низкочастотный стор.
     let unlisten: UnlistenFn | undefined;
@@ -183,6 +210,7 @@
       offFrame();
       offCard();
       offFilter();
+      offSearch();
       window.removeEventListener("keydown", onKey);
       unlisten?.();
       interaction?.dispose();
@@ -341,6 +369,8 @@
     <Legend />
     <!-- Фильтр-подсветка кандидатов (DoD): пишет в стор, рендер гасит остальное. -->
     <FilterPanel />
+    <!-- Поиск-подсветка по имени: тот же механизм дима (конъюнкция с фильтром). -->
+    <SearchBox />
   {/if}
 
   <!-- Центральный оверлей состояний (приветствие/пусто/ошибка/отмена). Сам

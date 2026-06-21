@@ -84,6 +84,13 @@ export const filterActive = computed(
   (f) => f.onlyCandidates || f.minSize > 0 || f.olderThanDays > 0,
 );
 
+/**
+ * Поисковый запрос (подсветка по имени, фаза 2 «сцена в тень, совпадения светятся»).
+ * Подсветка считается вместе с фильтром (конъюнкция) в `Scene` → `applyHighlight`.
+ * Пустая строка — поиск выключен. Низкочастотное (правка из инпута) — допустимо в сторе.
+ */
+export const searchQuery = atom<string>("");
+
 /** Один шаг навигации (хлебная крошка): путь уровня и его имя. */
 export interface Crumb {
   path: string;
