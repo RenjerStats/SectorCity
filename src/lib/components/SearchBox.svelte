@@ -1,9 +1,8 @@
 <script lang="ts">
   /**
-   * Поле поиска-подсветки (фаза 2). Пишет запрос в стор `searchQuery`; рендер
-   * гасит несовпадающие по имени узлы (Scene объединяет поиск с фильтром и зовёт
-   * `navigator.applyHighlight`). Презентационный компонент: своей 3D/IPC-логики
-   * нет, только правка строки запроса в сторе.
+   * Поле поиска-подсветки (фаза 2). Переехало в центр header. Пишет запрос в стор
+   * `searchQuery`; рендер гасит несовпадающие по имени узлы (Scene объединяет
+   * поиск с фильтром и зовёт `navigator.applyHighlight`). Презентационный.
    */
   import { searchQuery } from "../store/mode";
 
@@ -19,13 +18,12 @@
 </script>
 
 <div
-  class="search-container"
+  class="search"
   class:focused={isFocused}
   class:active={q.trim().length > 0}
 >
-  <!-- Иконка лупы -->
   <svg
-    class="search-icon"
+    class="icon"
     xmlns="http://www.w3.org/2000/svg"
     viewBox="0 0 24 24"
     fill="none"
@@ -33,6 +31,7 @@
     stroke-width="2.5"
     stroke-linecap="round"
     stroke-linejoin="round"
+    aria-hidden="true"
   >
     <circle cx="11" cy="11" r="8"></circle>
     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
@@ -67,109 +66,72 @@
 </div>
 
 <style>
-  .search-container {
-    /* Absolute anchoring at top center */
-    position: absolute;
-    top: 1rem;
-    left: 50%;
-    transform: translateX(-50%);
-
-    /* Layout */
+  .search {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.4rem 0.7rem;
-
-    /* Width limits and transition */
-    width: 15rem;
+    width: 100%;
+    max-width: 24rem;
     box-sizing: border-box;
-
-    /* Styling: Premium Dark Glassmorphism */
-    background: rgba(20, 22, 27, 0.92);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 8px;
-    box-shadow:
-      0 8px 24px rgba(0, 0, 0, 0.45),
-      0 0 0 1px rgba(255, 255, 255, 0.03);
-
-    z-index: 2;
+    padding: 0.32rem 0.7rem;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-pill);
     transition:
-      width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-      border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
-      box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      border-color var(--motion-micro) var(--ease-out),
+      box-shadow var(--motion-micro) var(--ease-out);
   }
-
-  /* Expand search bar when active or focused */
-  .search-container.focused,
-  .search-container.active {
-    width: 19rem;
-    border-color: rgba(79, 157, 255, 0.45);
-    box-shadow:
-      0 8px 32px rgba(0, 0, 0, 0.55),
-      0 0 0 1px rgba(79, 157, 255, 0.2),
-      0 0 16px rgba(79, 157, 255, 0.08);
+  .search.focused,
+  .search.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
-
-  /* Search magnifying glass icon */
-  .search-icon {
+  .icon {
     width: 0.9rem;
     height: 0.9rem;
-    color: var(--muted, #8b929c);
-    stroke-width: 2.5;
+    color: var(--text-muted);
     flex-shrink: 0;
-    transition: color 0.2s ease;
+    transition: color var(--motion-micro) var(--ease-out);
   }
-
-  .search-container.focused .search-icon,
-  .search-container.active .search-icon {
-    color: var(--accent, #4f9dff);
+  .search.focused .icon,
+  .search.active .icon {
+    color: var(--accent);
   }
-
-  /* Input fields override */
-  .search-container input {
+  input {
     font-family: inherit;
     font-size: 0.85rem;
     width: 100%;
-    color: var(--fg, #e6e6e6);
+    color: var(--text);
     background: none;
     border: none;
     outline: none;
     padding: 0;
     margin: 0;
   }
-
-  .search-container input::placeholder {
-    color: var(--muted, #8b929c);
-    opacity: 0.8;
+  input::placeholder {
+    color: var(--text-muted);
   }
-
-  /* Clear button */
   .clear {
-    background: none;
-    border: none;
-    color: var(--muted, #8b929c);
-    padding: 2px;
-    border-radius: 4px;
-    cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    padding: 2px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
     transition:
-      background-color 0.15s,
-      color 0.15s;
+      background var(--motion-micro) var(--ease-out),
+      color var(--motion-micro) var(--ease-out);
   }
-
   .clear svg {
     width: 0.8rem;
     height: 0.8rem;
-    stroke-width: 2.8;
   }
-
   .clear:hover {
     background: rgba(255, 255, 255, 0.08);
-    color: #ffffff;
+    color: var(--text);
   }
 </style>

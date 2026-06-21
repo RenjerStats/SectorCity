@@ -1,0 +1,91 @@
+/**
+ * Дизайн-токены SectorCity (см. docs/SectorCity-vision.md, Приложение A).
+ *
+ * Единый источник истины по облику DOM-слоя. Компоненты читают значения через
+ * var(--…) и НЕ хардкодят цвета/радиусы/тайминги — так стиль распространяется на
+ * весь UI и переключается темой в одном месте.
+ *
+ * Сейчас активна одна тема — graphite-red (Nothing-эстетика: графит + один
+ * красный акцент). Темизация (3–5 тем) позже: добавляем блоки
+ * `:root[data-theme="…"]` с переопределением семантических токенов; числовой
+ * зеркальный набор для 3D-слоя (Three не читает CSS) — в theme.ts.
+ */
+:root {
+  /* поверхности — значения «настоящего» Nothing OS (deep black + card-gray) */
+  --bg: #080808;
+  --surface: #121212;
+  --surface-2: #1e1e1e;
+  --overlay: rgba(8, 8, 8, 0.72);
+  --hairline: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.12);
+
+  /* текст */
+  --text: #ececec;
+  --text-2: #a8a8ad;
+  --text-muted: #6e6e73;
+
+  /* акцент — единственный (выбор, CTA, удаление, бренд).
+     #d71921 — аутентичный «Nothing red» (холоднее прежнего оранж-красного). */
+  --accent: #d71921;
+  --accent-hover: #e52931;
+  --accent-press: #b81219;
+  --accent-soft: rgba(215, 25, 33, 0.14);
+
+  /* точки-дороги (dot-grid) */
+  --dot: rgba(255, 255, 255, 0.1);
+  --dot-strong: rgba(255, 255, 255, 0.18);
+
+  /* семантика состояний */
+  --safe: #46b17b;
+  --stale: #e0a33e;
+  --danger: var(--accent);
+
+  /* радиусы */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+  --r-card: 24px; /* крупное скругление виджетов Nothing OS (карточки/панели) */
+  --r-pill: 999px;
+
+  /* отступы (сетка 4/8) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* тени / blur */
+  --elev-1: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --elev-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --blur: 12px;
+
+  /* высоты полос оболочки */
+  --header-h: 3rem;
+  --footer-h: 2.75rem;
+
+  /* типографика (локальные шрифты подключены в lib/styles/fonts.css).
+     display: dot-matrix «Nothing» (бренд SECTORCITY, латиница) — без кириллицы;
+     label:   Russo One — читаемые капс-лейблы UI с кириллицей (мелкие надписи,
+              где dot-matrix плохо читается, vision §II.7). */
+  --font-display: "Nothing", "JetBrains Mono", "Segoe UI", monospace;
+  --font-label: "Russo One", "Inter", "Segoe UI", sans-serif;
+  --font-ui: "Inter", system-ui, "Segoe UI", sans-serif; /* тело/UI */
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+  --track-caps: 0.12em; /* широкий трекинг для КАПС-лейблов (dot/Russo) */
+  /* плотный трекинг тела/не-капс-заголовков — приём Nothing (отрицательный) */
+  --track-base: -0.015em;
+  --track-heading: -0.03em;
+
+  /* движение */
+  --motion-micro: 120ms;
+  --motion-base: 240ms;
+  --motion-zoom: 500ms;
+  --motion-demolish: 700ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  /* --- легаси-алиасы (старые компоненты читают эти имена) --- */
+  --fg: var(--text);
+  --muted: var(--text-muted);
+}

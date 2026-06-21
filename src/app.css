@@ -1,10 +1,7 @@
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  /* Цветовые токены живут в lib/styles/tokens.css (единый источник, тема). */
+  font-family: var(--font-ui, Inter, system-ui, sans-serif);
   color-scheme: dark;
-  --bg: #11141a;
-  --fg: #e6e8eb;
-  --muted: #8b929c;
-  --accent: #4f9dff;
 }
 
 * {
@@ -23,4 +20,5 @@ body {
   background: var(--bg);
   color: var(--fg);
   overflow: hidden;
+  letter-spacing: var(--track-base); /* плотный трекинг тела — приём Nothing */
 }

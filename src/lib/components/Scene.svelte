@@ -4,11 +4,8 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { createScene, type SceneHandle } from "../three/scene";
   import { createNavigator, type CityNavigator } from "../three/navigator";
-  import Legend from "./Legend.svelte";
   import StatusOverlay from "./StatusOverlay.svelte";
   import NodeCard from "./NodeCard.svelte";
-  import FilterPanel from "./FilterPanel.svelte";
-  import SearchBox from "./SearchBox.svelte";
   import {
     setupInteraction,
     type InteractionController,
@@ -32,7 +29,8 @@
     searchQuery,
     type CandidateFilter,
   } from "../store/mode";
-  import type { ScanNode, ScanProgress } from "../ipc/contract";
+  import { uiCommand, levelSummary } from "../store/ui";
+  import type { Category, ScanNode, ScanProgress } from "../ipc/contract";
 
   // Этот компонент — ЕДИНСТВЕННЫЙ владелец 3D-сцены. Он монтирует canvas,
   // держит жизненный цикл сцены и наполняет её данными из IPC. Связь с
@@ -58,9 +56,18 @@
   /** Длительность зума камеры при drill (docs: ~500 мс). */
   const DRILL_MS = 500;
 
-  /** Грубое форматирование байтов в ГБ для панели прогресса. */
-  function formatGB(bytes: number): string {
-    return `${(bytes / 1e9).toFixed(2)} ГБ`;
+  /** Сводка уровня для footer (полоса заполнения по категориям): композиция
+   * прямых детей. Низкочастотно — пишем в стор на каждой смене уровня. */
+  function setSummary(nodes: ScanNode[], path: string) {
+    let totalBytes = 0;
+    let fileCount = 0;
+    const byCategory: Partial<Record<Category, number>> = {};
+    for (const n of nodes) {
+      totalBytes += n.size;
+      if (!n.isDir) fileCount += 1;
+      byCategory[n.category] = (byCategory[n.category] ?? 0) + n.size;
+    }
+    levelSummary.set({ path, totalBytes, fileCount, byCategory });
   }
 
   /** Предикат фильтра кандидатов; `null`, если критериев нет. Конъюнкция условий. */
@@ -119,6 +126,7 @@
     const nodes = await getLevel(path, TOP_N, 2);
     nav?.reset(nodes, path);
     interaction?.clearHover();
+    setSummary(nodes, path);
     return nodes.length;
   }
 
@@ -173,6 +181,28 @@
     const offFilter = candidateFilter.subscribe(() => refreshHighlight());
     const offSearch = searchQuery.subscribe(() => refreshHighlight());
 
+    // Команды из header (Scan/Cancel/Reset) — единственный канал «шапка → сцена»
+    // (docs §1: миры общаются только через стор). Снимаем команду ДО исполнения,
+    // чтобы вложенный subscribe(null) был холостым (гард на `!c`).
+    const offCmd = uiCommand.subscribe((c) => {
+      if (!c) return;
+      uiCommand.set(null);
+      switch (c.kind) {
+        case "scan":
+          void scanFolder();
+          break;
+        case "cancel":
+          cancel();
+          break;
+        case "reset":
+          resetView();
+          break;
+        case "goToCrumb":
+          void goToCrumb(c.index);
+          break;
+      }
+    });
+
     // Стрим прогресса скана с бэка (троттлинг там же) → низкочастотный стор.
     let unlisten: UnlistenFn | undefined;
     listen<ScanProgress>("scan://progress", (e) => {
@@ -211,6 +241,7 @@
       offCard();
       offFilter();
       offSearch();
+      offCmd();
       window.removeEventListener("keydown", onKey);
       unlisten?.();
       interaction?.dispose();
@@ -269,6 +300,7 @@
     const childNodes = await getLevel(node.path, TOP_N, 2);
     await nav.drill(node, childNodes, DRILL_MS);
     interaction?.clearHover();
+    setSummary(childNodes, node.path);
 
     breadcrumbs.set([
       ...$breadcrumbs,
@@ -318,60 +350,16 @@
     interaction?.clearSelection();
   }
 
-  let busy = $derived($appMode.kind === "scanning");
-  let zooming = $derived($appMode.kind === "zooming");
-  let progress = $derived($scanProgress);
   let hovered = $derived($hoveredNode);
   let selected = $derived($selectedNode);
-  let crumbs = $derived($breadcrumbs);
 </script>
 
 <div class="scene">
   <canvas bind:this={canvas}></canvas>
 
-  <div class="controls">
-    {#if busy}
-      <button onclick={cancel}>Отменить скан</button>
-    {:else}
-      <button onclick={scanFolder}>Сканировать папку</button>
-    {/if}
-    <button onclick={resetView}>Сбросить вид</button>
-  </div>
-
-  {#if crumbs.length > 0 && !busy}
-    <nav class="crumbs" aria-label="Навигация по уровням">
-      {#each crumbs as crumb, i (crumb.path)}
-        {#if i > 0}<span class="sep">›</span>{/if}
-        <button
-          class="crumb"
-          class:current={i === crumbs.length - 1}
-          disabled={i === crumbs.length - 1 || zooming}
-          onclick={() => goToCrumb(i)}
-        >
-          {crumb.name}
-        </button>
-      {/each}
-    </nav>
-  {/if}
-
-  {#if busy && progress && !progress.done}
-    <div class="progress">
-      Сканирую: {progress.entries.toLocaleString("ru")} объектов · {formatGB(
-        progress.bytes,
-      )}
-      {#if progress.errors > 0}· пропущено {progress.errors}{/if}
-    </div>
-  {/if}
-
-  <!-- Легенда кодирования (высота=устаревание, цвет=категория). DOM-оверлей,
-       читает только палитру; во время скана прячем, чтобы не мешать прогрессу. -->
-  {#if !busy}
-    <Legend />
-    <!-- Фильтр-подсветка кандидатов (DoD): пишет в стор, рендер гасит остальное. -->
-    <FilterPanel />
-    <!-- Поиск-подсветка по имени: тот же механизм дима (конъюнкция с фильтром). -->
-    <SearchBox />
-  {/if}
+  <!-- Крошки переехали в sub-header (Breadcrumbs), легенда/фильтр/поиск — в
+       header/footer (docs Приложение B). В сцене остаются только заякоренные к
+       3D оверлеи: статус, тултип, карточка. -->
 
   <!-- Центральный оверлей состояний (приветствие/пусто/ошибка/отмена). Сам
        рисует пустоту при "none"; кнопка запускает тот же scanFolder. -->
@@ -417,82 +405,6 @@
     width: 100%;
     height: 100%;
   }
-  .controls {
-    position: absolute;
-    top: 1rem;
-    right: 1rem;
-    display: flex;
-    gap: 0.5rem;
-  }
-  .controls button {
-    padding: 0.4rem 0.8rem;
-    font: inherit;
-    color: var(--fg, #e6e6e6);
-    background: rgba(30, 32, 38, 0.85);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 0.4rem;
-    cursor: pointer;
-  }
-  .controls button:hover:not(:disabled) {
-    background: rgba(45, 48, 56, 0.95);
-  }
-  .controls button:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-
-  .crumbs {
-    position: absolute;
-    top: 1rem;
-    left: 1rem;
-    display: flex;
-    align-items: center;
-    gap: 0.25rem;
-    max-width: 70vw;
-    flex-wrap: wrap;
-    padding: 0.35rem 0.6rem;
-    background: rgba(30, 32, 38, 0.85);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 0.4rem;
-  }
-  .crumb {
-    font: inherit;
-    font-size: 0.85rem;
-    color: var(--accent, #4f9dff);
-    background: none;
-    border: none;
-    padding: 0.1rem 0.2rem;
-    cursor: pointer;
-  }
-  .crumb.current {
-    color: var(--fg, #e6e6e6);
-    cursor: default;
-  }
-  .crumb:disabled {
-    cursor: default;
-  }
-  .crumb:not(:disabled):hover {
-    text-decoration: underline;
-  }
-  .sep {
-    color: var(--muted, #8b929c);
-    font-size: 0.85rem;
-  }
-
-  .progress {
-    position: absolute;
-    left: 50%;
-    bottom: 1.5rem;
-    transform: translateX(-50%);
-    padding: 0.5rem 1rem;
-    font-size: 0.9rem;
-    color: var(--fg, #e6e6e6);
-    background: rgba(30, 32, 38, 0.9);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 0.4rem;
-    white-space: nowrap;
-  }
-
   .card-anchor {
     position: absolute;
     top: 0;
@@ -515,13 +427,16 @@
     min-width: 12rem;
     max-width: 22rem;
     padding: 0.5rem 0.7rem;
-    background: rgba(20, 22, 27, 0.95);
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    border-radius: 0.4rem;
+    background: var(--overlay);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
     font-size: 0.85rem;
     line-height: 1.35;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
-    transition: opacity 0.1s;
+    color: var(--text);
+    box-shadow: var(--elev-2);
+    transition: opacity var(--motion-micro) var(--ease-out);
   }
   .tooltip .name {
     display: block;
@@ -534,20 +449,21 @@
     margin-top: 0.15rem;
   }
   .tooltip .cat {
-    color: var(--muted, #8b929c);
+    color: var(--text-muted);
   }
   .tooltip .cleanup {
     margin-top: 0.15rem;
-    color: #f2c14e;
+    color: var(--stale);
     font-size: 0.8rem;
   }
   .tooltip .muted {
-    color: var(--muted, #8b929c);
+    color: var(--text-muted);
   }
   .tooltip .path {
     margin-top: 0.25rem;
-    color: var(--muted, #8b929c);
+    color: var(--text-muted);
     font-size: 0.75rem;
+    font-family: var(--font-mono);
     word-break: break-all;
   }
 </style>

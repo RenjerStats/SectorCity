@@ -24,3 +24,7 @@ src-tauri/target
 CLAUDE.md
 docs/
 .serena/
+
+# Крупный исходник dot-шрифта Ndot77 (~14 МБ, с японскими глифами): в бандл
+# идёт только subset Ndot-CyrLat.woff2. Исходник держим локально для ре-subset.
+src/lib/styles/fonts/Ndot77JPExtended.ttf

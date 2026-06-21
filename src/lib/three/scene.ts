@@ -66,7 +66,7 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
   const scene = new Scene();
-  scene.background = new Color(0x0e0f13);
+  scene.background = new Color(0x080808); // = --bg (Nothing deep black, синхр. с DOM)
 
   // far большой: декор (родительский уровень) после origin shift раздут в 1/s и
   // выглядывает по краям холста — он должен оставаться в пределах отсечения.

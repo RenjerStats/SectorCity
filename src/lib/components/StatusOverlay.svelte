@@ -18,7 +18,7 @@
   <div class="overlay-container">
     <div class="status-card">
       {#if kind === "welcome"}
-        <h2 class="title accent">SectorCity</h2>
+        <h2 class="title accent">SECTORCITY</h2>
         <p class="description">
           Инструмент анализа дискового пространства.<br />Здание — файл, район —
           папка. Кодирование площади, высоты и цвета поможет быстро найти мусор.
@@ -65,76 +65,56 @@
     padding: 2rem;
   }
 
+  /* Матовая центральная карточка состояния (Nothing). */
   .status-card {
     pointer-events: auto;
     width: 100%;
     max-width: 420px;
-    background: rgba(14, 15, 19, 0.85);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 0.75rem;
+    background: var(--overlay);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
     padding: 2rem;
-    box-shadow:
-      0 10px 30px rgba(0, 0, 0, 0.5),
-      inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    box-shadow: var(--elev-2);
     text-align: center;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 1.25rem;
-    animation: fadeIn 0.3s ease-out;
+    animation: fadeIn var(--motion-base) var(--ease-out);
   }
 
   @keyframes fadeIn {
     from {
       opacity: 0;
-      transform: scale(0.95);
+      transform: translateY(6px) scale(0.98);
     }
     to {
       opacity: 1;
-      transform: scale(1);
+      transform: none;
     }
   }
 
   .title {
     margin: 0;
-    font-size: 1.75rem;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-    background: linear-gradient(
-      135deg,
-      #ffffff 40%,
-      rgba(255, 255, 255, 0.6) 100%
-    );
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
+    font-family: var(--font-display);
+    font-size: 1.6rem;
+    letter-spacing: var(--track-caps);
+    color: var(--text);
   }
-
   .title.accent {
-    background: linear-gradient(
-      135deg,
-      #ffffff 30%,
-      var(--accent, #4f9dff) 100%
-    );
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
+    color: var(--text);
   }
-
   .title.error {
-    background: linear-gradient(135deg, #ffffff 30%, #ff6b6b 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
+    color: var(--accent);
   }
 
   .description {
     margin: 0;
     font-size: 0.9rem;
     line-height: 1.5;
-    color: var(--muted, #8b929c);
+    color: var(--text-2);
     max-width: 100%;
   }
 
@@ -142,48 +122,42 @@
     display: inline-block;
     margin-top: 0.5rem;
     font-size: 0.85rem;
-    color: #ff6b6b;
-    background: rgba(255, 107, 107, 0.1);
-    border: 1px solid rgba(255, 107, 107, 0.2);
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid rgba(215, 25, 33, 0.3);
     padding: 0.25rem 0.6rem;
-    border-radius: 0.25rem;
+    border-radius: var(--r-sm);
   }
 
+  /* Главное действие — красная заливка (CTA). */
   .action-btn {
     font-family: inherit;
-    font-size: 0.95rem;
-    font-weight: 500;
-    color: #ffffff;
-    background: var(--accent, #4f9dff);
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
     border: none;
-    border-radius: 0.375rem;
-    padding: 0.6rem 1.25rem;
+    border-radius: var(--r-pill);
+    padding: 0.55rem 1.25rem;
     cursor: pointer;
     transition:
-      background-color 0.2s,
-      transform 0.1s,
-      box-shadow 0.2s;
-    box-shadow: 0 4px 12px rgba(79, 157, 255, 0.3);
+      background var(--motion-micro) var(--ease-out),
+      transform var(--motion-micro) var(--ease-out);
   }
-
   .action-btn:hover {
-    background: #3a86eb;
-    box-shadow: 0 4px 16px rgba(79, 157, 255, 0.4);
+    background: var(--accent-hover);
   }
-
   .action-btn:active {
-    transform: scale(0.97);
+    transform: scale(0.98);
   }
 
   .action-btn.secondary {
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    color: var(--fg, #e6e8eb);
-    box-shadow: none;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
   }
-
   .action-btn.secondary:hover {
-    background: rgba(255, 255, 255, 0.15);
+    background: #232327;
     border-color: rgba(255, 255, 255, 0.2);
   }
 </style>

@@ -1,0 +1,76 @@
+/**
+ * Локальные шрифты (см. docs/SectorCity-vision.md §II.7). Файлы лежат рядом
+ * (`./fonts/`), импортируются через url() — Vite их хэширует и кладёт в бандл
+ * ТОЛЬКО те, что реально использованы (полные релизы из public/ не тащим).
+ *
+ * Семейства подключаются к ролям-токенам в tokens.css:
+ *   --font-ui    → Inter (вариативный, 100–900)
+ *   --font-mono  → JetBrains Mono (Regular 400 + Medium 500)
+ *   --font-display → Nothing/Ndot77 (dot-matrix с кириллицей: бренд, заголовки, KPI)
+ *   --font-label → Russo One (капс-лейблы UI: «КАТЕГОРИИ», «ВЫСОТА», «ГБ»…)
+ *                  — стилизованный, но читаемый и С КИРИЛЛИЦЕЙ, в отличие от
+ *                  «Nothing». Применяется к мелким капс-надписям, где dot-matrix
+ *                  плохо читается (vision §II.7: dot-matrix дозированно).
+ *
+ * Лицензии рядом: Inter-LICENSE.txt (OFL), JetBrainsMono-OFL.txt (OFL),
+ * RussoOne-OFL.txt (OFL).
+ */
+
+/* Inter — один вариативный файл покрывает все веса (тело/UI). */
+@font-face {
+  font-family: "Inter";
+  src: url("./fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* JetBrains Mono — пути файлов, байты, табличные числа. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./fonts/JetBrainsMono-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Nothing — dot-matrix display-шрифт (бренд SECTORCITY, крупные заголовки/KPI).
+   Это Ndot77 (фирменная гарнитура Nothing) — теперь С КИРИЛЛИЦЕЙ, поэтому
+   крупные русские заголовки рендерятся точками, а не моноширинным фолбэком.
+   Исходник (Ndot77JPExtended.ttf, ~14 МБ с японскими глифами) subset'нут под
+   латиницу+кириллицу+пунктуацию через fontTools → woff2 (~11 КБ). */
+@font-face {
+  font-family: "Nothing";
+  src: url("./fonts/Ndot-CyrLat.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Russo One — капс-лейблы UI (читаемая стилизация, есть кириллица).
+   Два subset'а Google Fonts: кириллица + латиница, unicode-range их разводит. */
+@font-face {
+  font-family: "Russo One";
+  src: url("./fonts/RussoOne-Cyrillic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Russo One";
+  src: url("./fonts/RussoOne-Latin.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}

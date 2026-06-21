@@ -4,9 +4,6 @@
    * компонент: КОНТЕНТ берёт реактивно из стора `selectedNode`, ПОЗИЦИЮ не знает
    * — её ставит владелец (Scene) императивно покадрово на обёртке (docs §4).
    * Действия проксирует наружу через колбэки-пропсы; своей логики IPC не имеет.
-   *
-   * Презентацию (вёрстка/CSS) можно дорабатывать отдельно (тикет Gemini): контракт
-   * — пропсы `onReveal`/`onClose` и чтение `selectedNode`; не трогать позиционирование.
    */
   import { selectedNode } from "../store/mode";
   import { CATEGORY_LABEL, CATEGORY_COLOR } from "../three/palette";
@@ -23,13 +20,10 @@
 
   let node = $derived($selectedNode);
 
-  // Преобразование числового цвета категории в строку CSS hex
   function getCategoryColor(cat: Category): string {
     const num = CATEGORY_COLOR[cat] ?? 0x8a8f98;
     return "#" + num.toString(16).padStart(6, "0");
   }
-
-  // Получение полупрозрачного RGBA для красивых бэджей/бордеров
   function getCategoryBg(cat: Category, alpha = 0.15): string {
     const num = CATEGORY_COLOR[cat] ?? 0x8a8f98;
     const r = (num >> 16) & 255;
@@ -48,7 +42,6 @@
     <div class="header">
       <div class="title-group">
         {#if node.isDir}
-          <!-- Иконка папки -->
           <svg
             class="node-icon dir"
             xmlns="http://www.w3.org/2000/svg"
@@ -60,7 +53,6 @@
             />
           </svg>
         {:else}
-          <!-- Иконка файла с цветом категории -->
           <svg
             class="node-icon file"
             style="color: {getCategoryColor(node.category)}"
@@ -93,7 +85,6 @@
       </button>
     </div>
 
-    <!-- Тонкий футуристичный разделитель -->
     <div class="divider"></div>
 
     <!-- Важные метаданные: размер и цветной бэдж категории -->
@@ -209,52 +200,34 @@
 {/if}
 
 <style>
+  /* Матовая «премиум-пластик» карточка (Nothing), скруглённая, акцент — красный. */
   .card {
-    /* pointer-events must be auto so interactive elements are clickable */
     pointer-events: auto;
-
-    /* Sizing limits */
+    position: relative;
     min-width: 14rem;
     max-width: 24rem;
     width: max-content;
     box-sizing: border-box;
     padding: 0.9rem 1.05rem;
-
-    /* Styling: Premium Dark Glassmorphism */
-    background: rgba(20, 22, 27, 0.95);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
-    box-shadow:
-      0 12px 32px rgba(0, 0, 0, 0.55),
-      0 0 0 1px rgba(255, 255, 255, 0.05),
-      0 0 24px rgba(79, 157, 255, 0.03);
-
-    /* Typography & Hierarchy */
+    background: var(--overlay);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    box-shadow: var(--elev-2);
     font-family: inherit;
     font-size: 0.85rem;
     line-height: 1.4;
-    color: var(--fg, #e6e6e6);
-
-    /* Relative positioning to anchor close button and bottom arrow */
-    position: relative;
-
-    /* Smooth glow transition on hover */
+    color: var(--text);
     transition:
-      box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-      border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow var(--motion-base) var(--ease-out),
+      border-color var(--motion-base) var(--ease-out);
   }
-
   .card:hover {
-    border-color: rgba(79, 157, 255, 0.25);
-    box-shadow:
-      0 16px 40px rgba(0, 0, 0, 0.65),
-      0 0 0 1px rgba(79, 157, 255, 0.15),
-      0 0 28px rgba(79, 157, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.2);
   }
 
-  /* Triangle tail at the bottom center of the card */
+  /* Стрелка-хвостик вниз к зданию. */
   .arrow {
     position: absolute;
     bottom: -6px;
@@ -262,28 +235,21 @@
     transform: translateX(-50%) rotate(45deg);
     width: 12px;
     height: 12px;
-    background: rgba(20, 22, 27, 0.95);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--overlay);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
     z-index: -1;
     pointer-events: none;
-    transition: border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
-  .card:hover .arrow {
-    border-color: rgba(79, 157, 255, 0.25);
-  }
-
-  /* Header elements */
   .header {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
     gap: 1.25rem;
   }
-
   .title-group {
     display: flex;
     align-items: center;
@@ -291,157 +257,139 @@
     min-width: 0;
     flex: 1;
   }
-
   .node-icon {
     width: 1.1rem;
     height: 1.1rem;
     flex-shrink: 0;
   }
-
   .node-icon.dir {
-    color: var(--accent, #4f9dff);
+    color: var(--text-2);
   }
-
   .name {
     font-weight: 600;
     font-size: 0.92rem;
-    color: #ffffff;
+    color: var(--text);
     overflow-wrap: break-word;
-    word-wrap: break-word;
     word-break: break-word;
     min-width: 0;
   }
 
-  /* Close button */
   .close {
     background: none;
     border: none;
-    color: var(--muted, #8b929c);
+    color: var(--text-muted);
     padding: 0.2rem;
-    border-radius: 4px;
+    border-radius: var(--r-sm);
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
     transition:
-      background-color 0.15s,
-      color 0.15s,
-      transform 0.15s;
+      background var(--motion-micro) var(--ease-out),
+      color var(--motion-micro) var(--ease-out),
+      transform var(--motion-base) var(--ease-out);
   }
-
   .close svg {
     width: 1.1rem;
     height: 1.1rem;
   }
-
   .close:hover {
     background: rgba(255, 255, 255, 0.08);
-    color: #ffffff;
+    color: var(--text);
     transform: rotate(90deg);
   }
 
   .divider {
     height: 1px;
-    background: rgba(255, 255, 255, 0.07);
+    background: var(--hairline);
     margin: 0.6rem 0;
   }
 
-  /* Core layout row (size + category) */
   .row {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
   }
-
   .info-row {
     margin-bottom: 0.65rem;
   }
-
+  /* Размер — крупно, dot-matrix (фирменный KPI). */
   .size {
-    font-size: 1.05rem;
-    font-weight: 700;
-    color: var(--fg, #e6e6e6);
-    letter-spacing: -0.01em;
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    letter-spacing: 0.02em;
+    color: var(--text);
   }
 
-  /* Category badge */
+  /* Бэдж категории — цвет канала категории (инлайн-стили). */
   .cat-badge {
     font-size: 0.72rem;
     font-weight: 600;
     padding: 0.15rem 0.45rem;
-    border-radius: 4px;
+    border-radius: var(--r-sm);
     border: 1px solid;
     letter-spacing: 0.01em;
     white-space: nowrap;
   }
 
-  /* Details list */
   .details-section {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
     margin-bottom: 0.65rem;
   }
-
   .detail-item {
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    color: var(--muted, #8b929c);
+    color: var(--text-muted);
     font-size: 0.76rem;
   }
-
   .detail-icon {
     width: 0.8rem;
     height: 0.8rem;
     flex-shrink: 0;
   }
-
   .detail-text {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-
   .highlight {
-    color: rgba(255, 255, 255, 0.8);
+    color: var(--text-2);
     font-weight: 500;
   }
 
-  /* Warn section (cleanupCandidate) */
+  /* Кандидат на очистку — семантический амбер (--stale), не акцент. */
   .cleanup-warning {
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    background: rgba(242, 193, 78, 0.08);
-    border: 1px solid rgba(242, 193, 78, 0.25);
-    color: #f2c14e;
+    background: rgba(224, 163, 62, 0.1);
+    border: 1px solid rgba(224, 163, 62, 0.3);
+    color: var(--stale);
     padding: 0.35rem 0.55rem;
-    border-radius: 5px;
+    border-radius: var(--r-sm);
     font-size: 0.76rem;
     font-weight: 600;
     margin-bottom: 0.65rem;
-    box-shadow: 0 2px 8px rgba(242, 193, 78, 0.04);
   }
-
   .warning-icon {
     width: 0.85rem;
     height: 0.85rem;
     flex-shrink: 0;
   }
 
-  /* File path box styling */
   .path-container {
-    background: rgba(0, 0, 0, 0.2);
-    border: 1px solid rgba(255, 255, 255, 0.03);
-    border-radius: 5px;
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-sm);
     padding: 0.35rem 0.5rem;
     font-size: 0.72rem;
-    font-family:
-      ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    color: var(--muted, #8b929c);
+    font-family: var(--font-mono);
+    color: var(--text-muted);
     margin-bottom: 0.8rem;
     display: flex;
     flex-direction: column;
@@ -449,79 +397,60 @@
     max-height: 4.2rem;
     overflow: hidden;
   }
-
   .path-label {
     font-size: 0.62rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: rgba(255, 255, 255, 0.25);
+    color: var(--text-muted);
   }
-
   .path-text {
     word-break: break-all;
     overflow-y: auto;
     line-height: 1.35;
-    /* Custom scrollbar */
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
   }
-
   .path-text::-webkit-scrollbar {
     width: 3px;
     height: 3px;
   }
-
   .path-text::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.1);
     border-radius: 2px;
   }
 
-  /* Action button wrapper & primary button styling */
+  /* Главное действие — красная заливка (CTA). */
   .actions {
     display: flex;
     width: 100%;
   }
-
   .reveal-btn {
     width: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 0.4rem;
-    padding: 0.45rem;
+    padding: 0.5rem;
     font-family: inherit;
     font-size: 0.8rem;
     font-weight: 600;
-    color: #ffffff;
-    background: linear-gradient(
-      135deg,
-      var(--accent, #4f9dff) 0%,
-      rgba(79, 157, 255, 0.8) 100%
-    );
+    color: #fff;
+    background: var(--accent);
     border: none;
-    border-radius: 5px;
+    border-radius: var(--r-md);
     cursor: pointer;
-    box-shadow: 0 2px 8px rgba(79, 157, 255, 0.18);
     transition:
-      transform 0.15s,
-      box-shadow 0.15s,
-      background-color 0.15s;
+      background var(--motion-micro) var(--ease-out),
+      transform var(--motion-micro) var(--ease-out);
   }
-
   .reveal-btn:hover {
-    transform: translateY(-1px);
-    background: linear-gradient(135deg, #60a7ff 0%, #4f9dff 100%);
-    box-shadow:
-      0 4px 12px rgba(79, 157, 255, 0.3),
-      0 0 12px rgba(79, 157, 255, 0.12);
+    background: var(--accent-hover);
   }
-
   .reveal-btn:active {
-    transform: translateY(0);
-    box-shadow: 0 2px 4px rgba(79, 157, 255, 0.18);
+    background: var(--accent-press);
+    transform: translateY(0.5px);
   }
-
   .btn-icon {
     width: 0.8rem;
     height: 0.8rem;
