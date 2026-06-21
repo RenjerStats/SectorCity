@@ -89,7 +89,7 @@
   }
   .brand-name {
     font-family: var(--font-display);
-    font-size: 0.95rem;
+    font-size: 1.2rem; /* крупнее — dot-matrix глифы Ndot77 читаются точками */
     letter-spacing: var(--track-caps);
     color: var(--text);
     white-space: nowrap;

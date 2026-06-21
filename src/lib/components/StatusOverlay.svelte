@@ -99,7 +99,7 @@
   .title {
     margin: 0;
     font-family: var(--font-display);
-    font-size: 1.6rem;
+    font-size: 2rem; /* крупнее — dot-matrix Ndot77 читается точками */
     letter-spacing: var(--track-caps);
     color: var(--text);
   }

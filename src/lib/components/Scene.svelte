@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import type { Vector3 } from "three";
   import { open } from "@tauri-apps/plugin-dialog";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { createScene, type SceneHandle } from "../three/scene";
@@ -10,8 +11,6 @@
     setupInteraction,
     type InteractionController,
   } from "../three/interaction";
-  import { CATEGORY_LABEL } from "../three/palette";
-  import { formatSize, formatDate } from "../format";
   import {
     getLevel,
     startScan,
@@ -34,16 +33,17 @@
 
   // Этот компонент — ЕДИНСТВЕННЫЙ владелец 3D-сцены. Он монтирует canvas,
   // держит жизненный цикл сцены и наполняет её данными из IPC. Связь с
-  // остальным DOM — через стор; высокочастотную позицию тултипа пишем в DOM
-  // императивно (в обход реактивности), контент тултипа — реактивно из стора.
+  // остальным DOM — через стор; высокочастотную позицию окна над зданием пишем
+  // в DOM императивно (в обход реактивности), контент окна — реактивно из стора.
   let canvas: HTMLCanvasElement;
   let handle: SceneHandle | undefined;
   let nav: CityNavigator | undefined;
   let interaction: InteractionController | undefined;
-  let tooltipEl = $state<HTMLDivElement | undefined>(undefined);
-  // Обёртка карточки выбранного узла: позицию ставим императивно покадрово
-  // (как у тултипа), КОНТЕНТ карточки — реактивно из стора `selectedNode`.
+  // Два независимых оверлея-окна одного стиля: cardEl — полное на ВЫБРАННОМ
+  // (с разворотом), hoverEl — мини на НАВЕДЁННОМ (компактное, без анимации).
+  // Позицию ставим императивно покадрово; контент — реактивно из сторов.
   let cardEl = $state<HTMLDivElement | undefined>(undefined);
+  let hoverEl = $state<HTMLDivElement | undefined>(undefined);
 
   // Состояние центрального оверлея (приветствие/пусто/ошибка/отмена). Низко-
   // частотное — обычный $state; "none" = город виден, оверлей не рисуется.
@@ -149,25 +149,24 @@
       nav?.updateLOD();
     });
 
-    // Позицию тултипа обновляем покадрово императивно (вне реконсиляции Svelte).
-    const offFrame = handle.onFrame(() => {
-      if (!tooltipEl || !handle || !interaction) return;
-      const anchor = interaction.hoverAnchor();
-      if (!anchor) return;
+    // Позицию окон над зданием ставим покадрово императивно (вне реконсиляции
+    // Svelte, docs §4): полное — по якорю выбранного, мини — по якорю
+    // наведённого. Контент/режим отрисованы реактивно; здесь только проекция.
+    const place = (el: HTMLDivElement | undefined, anchor: Vector3 | null) => {
+      if (!el || !handle) return;
+      if (!anchor) {
+        el.style.opacity = "0";
+        return;
+      }
       const s = handle.worldToScreen(anchor);
-      tooltipEl.style.transform = `translate(-50%, -100%) translate(${s.x}px, ${s.y}px)`;
-      tooltipEl.style.opacity = s.visible ? "1" : "0";
-    });
-
-    // Позицию карточки выбранного узла — тоже покадрово императивно (docs §4).
-    // Контент уже отрисован реактивно (selectedNode); здесь только проекция.
+      el.style.transform = `translate(-50%, -100%) translate(${s.x}px, ${s.y}px)`;
+      el.style.opacity = s.visible ? "1" : "0";
+    };
     const offCard = handle.onFrame(() => {
-      if (!cardEl || !handle || !interaction) return;
-      const anchor = interaction.selectionAnchor();
-      if (!anchor) return;
-      const s = handle.worldToScreen(anchor);
-      cardEl.style.transform = `translate(-50%, -100%) translate(${s.x}px, ${s.y}px)`;
-      cardEl.style.opacity = s.visible ? "1" : "0";
+      if (!interaction) return;
+      // cardEl — полное окно по якорю выбранного; hoverEl — мини по наведённому.
+      place(cardEl, interaction.selectionAnchor());
+      place(hoverEl, interaction.hoverAnchor());
     });
 
     // ESC — снять выбор (закрыть карточку). Глобально, т.к. фокус на canvas.
@@ -237,7 +236,6 @@
 
     return () => {
       offLod();
-      offFrame();
       offCard();
       offFilter();
       offSearch();
@@ -350,6 +348,8 @@
     interaction?.clearSelection();
   }
 
+  // Два НЕЗАВИСИМЫХ окна: полное на выбранном и мини на наведённом. Никакого
+  // общего состояния — иначе hover дёргает разворот выбранного (см. NodeCard).
   let hovered = $derived($hoveredNode);
   let selected = $derived($selectedNode);
 </script>
@@ -365,31 +365,38 @@
        рисует пустоту при "none"; кнопка запускает тот же scanFolder. -->
   <StatusOverlay kind={statusKind} errors={statusErrors} onScan={scanFolder} />
 
-  {#if hovered}
-    <div class="tooltip" bind:this={tooltipEl}>
-      <strong class="name">{hovered.name}</strong>
-      <div class="row">
-        <span class="size">{formatSize(hovered.size)}</span>
-        <span class="cat">{CATEGORY_LABEL[hovered.category]}</span>
-      </div>
-      <div class="muted">изменён {formatDate(hovered.mtime)}</div>
-      {#if hovered.isDir}
-        <div class="muted">
-          {hovered.childCount.toLocaleString("ru")} элементов
-        </div>
-      {/if}
-      {#if hovered.flags.includes("cleanupCandidate")}
-        <div class="cleanup">⚑ кандидат на очистку</div>
-      {/if}
-      <div class="path">{hovered.path}</div>
+  <!-- Единое окно над зданием: компактный hover-вид разворачивается по клику в
+       полную карточку (docs §I.9). Узел — выбранный, иначе наведённый; режим
+       `expanded` = есть выбор. Обёртку позиционируем императивно покадрово (см.
+       onFrame), контент/анимацию — реактивно из стора. -->
+  <!-- Полное окно ВЫБРАННОГО узла. `{#key}` по пути — выбор нового файла
+       пересоздаёт окно, поэтому `in:slide|global` проигрывает разворот заново
+       (а не «перескок»). Наведение на другие здания его НЕ трогает. -->
+  {#if selected}
+    <div class="card-anchor" bind:this={cardEl}>
+      {#key selected.path}
+        <NodeCard
+          node={selected}
+          expanded={true}
+          onReveal={revealNode}
+          onClose={closeCard}
+        />
+      {/key}
     </div>
   {/if}
 
-  <!-- Карточка выбранного узла (режим SELECT). Обёртку позиционируем
-       императивно покадрово (см. onFrame выше); контент — реактивно из стора. -->
-  {#if selected}
-    <div class="card-anchor" bind:this={cardEl}>
-      <NodeCard onReveal={revealNode} onClose={closeCard} />
+  <!-- Мини-окно НАВЕДЁННОГО узла (компактное, не дублируется на выбранном).
+       Показывается и при открытом полном окне. `expanded=false` → блока разворота
+       нет → не анимируется, просто следует за курсором. Пассивно (pointer-events
+       на компактном — none): клик уходит зданию под ним. -->
+  {#if hovered && hovered.path !== selected?.path}
+    <div class="card-anchor" bind:this={hoverEl}>
+      <NodeCard
+        node={hovered}
+        expanded={false}
+        onReveal={revealNode}
+        onClose={closeCard}
+      />
     </div>
   {/if}
 </div>
@@ -414,56 +421,5 @@
     opacity: 0;
     pointer-events: none;
     z-index: 2;
-  }
-
-  .tooltip {
-    position: absolute;
-    top: 0;
-    left: 0;
-    /* Позиция и видимость ставятся императивно (см. onFrame); до первого
-       кадра прячем, чтобы не мигнуть в углу. */
-    opacity: 0;
-    pointer-events: none;
-    min-width: 12rem;
-    max-width: 22rem;
-    padding: 0.5rem 0.7rem;
-    background: var(--overlay);
-    backdrop-filter: blur(var(--blur));
-    -webkit-backdrop-filter: blur(var(--blur));
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    font-size: 0.85rem;
-    line-height: 1.35;
-    color: var(--text);
-    box-shadow: var(--elev-2);
-    transition: opacity var(--motion-micro) var(--ease-out);
-  }
-  .tooltip .name {
-    display: block;
-    word-break: break-all;
-  }
-  .tooltip .row {
-    display: flex;
-    justify-content: space-between;
-    gap: 0.75rem;
-    margin-top: 0.15rem;
-  }
-  .tooltip .cat {
-    color: var(--text-muted);
-  }
-  .tooltip .cleanup {
-    margin-top: 0.15rem;
-    color: var(--stale);
-    font-size: 0.8rem;
-  }
-  .tooltip .muted {
-    color: var(--text-muted);
-  }
-  .tooltip .path {
-    margin-top: 0.25rem;
-    color: var(--text-muted);
-    font-size: 0.75rem;
-    font-family: var(--font-mono);
-    word-break: break-all;
   }
 </style>

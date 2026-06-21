@@ -74,7 +74,9 @@
     color: var(--text-muted);
     white-space: nowrap;
   }
+  /* «устаревание» — тем же шрифтом, что .cap «ВЫСОТА» (единый читаемый стиль). */
   .hint {
+    font-family: var(--font-label);
     font-size: 0.68rem;
     color: var(--text-muted);
     white-space: nowrap;

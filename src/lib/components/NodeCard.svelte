@@ -1,24 +1,30 @@
 <script lang="ts">
   /**
-   * Карточка-окно над выбранным зданием (режим `selected`). Презентационный
-   * компонент: КОНТЕНТ берёт реактивно из стора `selectedNode`, ПОЗИЦИЮ не знает
-   * — её ставит владелец (Scene) императивно покадрово на обёртке (docs §4).
-   * Действия проксирует наружу через колбэки-пропсы; своей логики IPC не имеет.
+   * Единое окно над зданием: компактный вид по наведению (имя · категория ·
+   * размер) разворачивается по клику в полную карточку (даты · путь · действия)
+   * с анимацией. Один источник формы/стиля для hover и select (раньше были два
+   * отдельных оверлея — тултип и карточка — с дублирующейся информацией).
+   *
+   * Презентационный компонент: КОНТЕНТ и режим (`expanded`) приходят пропсами,
+   * ПОЗИЦИЮ ставит владелец (Scene) императивно покадрово (docs §4). Действия
+   * проксируются наружу колбэками; своей логики IPC нет.
    */
-  import { selectedNode } from "../store/mode";
+  import { slide } from "svelte/transition";
   import { CATEGORY_LABEL, CATEGORY_COLOR } from "../three/palette";
   import { formatSize, formatDate } from "../format";
-  import type { Category } from "../ipc/contract";
+  import type { Category, ScanNode } from "../ipc/contract";
 
   interface Props {
+    /** Узел для показа (наведённый или выбранный). */
+    node: ScanNode;
+    /** true — полная карточка (выбор); false — компактный hover-вид. */
+    expanded: boolean;
     /** «Показать в проводнике» (безопасно). Владелец заворачивает IPC + ошибки. */
     onReveal: (path: string) => void;
     /** Закрыть карточку (снять выбор). */
     onClose: () => void;
   }
-  let { onReveal, onClose }: Props = $props();
-
-  let node = $derived($selectedNode);
+  let { node, expanded, onReveal, onClose }: Props = $props();
 
   function getCategoryColor(cat: Category): string {
     const num = CATEGORY_COLOR[cat] ?? 0x8a8f98;
@@ -33,12 +39,9 @@
   }
 </script>
 
-{#if node}
-  <div class="card" role="dialog" aria-label="Карточка узла">
-    <!-- Стрелка-хвостик внизу по центру, указывающая на здание -->
-    <div class="arrow"></div>
-
-    <!-- Заголовок: иконка (папка/файл) + имя файла + кнопка закрытия -->
+<div class="card-wrap">
+  <div class="card" class:expanded role="dialog" aria-label="Карточка узла">
+    <!-- Заголовок: иконка (папка/файл) + имя + кнопка закрытия (только в развёрнутом) -->
     <div class="header">
       <div class="title-group">
         {#if node.isDir}
@@ -69,25 +72,25 @@
         {/if}
         <span class="name" title={node.name}>{node.name}</span>
       </div>
-      <button class="close" onclick={onClose} aria-label="Закрыть">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <line x1="18" y1="6" x2="6" y2="18"></line>
-          <line x1="6" y1="6" x2="18" y2="18"></line>
-        </svg>
-      </button>
+      {#if expanded}
+        <button class="close" onclick={onClose} aria-label="Закрыть">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      {/if}
     </div>
 
-    <div class="divider"></div>
-
-    <!-- Важные метаданные: размер и цветной бэдж категории -->
+    <!-- Важное (всегда видно): размер крупно (dot-matrix KPI) + бэдж категории -->
     <div class="row info-row">
       <span class="size">{formatSize(node.size)}</span>
       <span
@@ -103,110 +106,132 @@
       </span>
     </div>
 
-    <!-- Дополнительные параметры: дата изменения и число элементов (для папок) -->
-    <div class="details-section">
-      <div class="detail-item">
-        <svg
-          class="detail-icon"
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <circle cx="12" cy="12" r="10"></circle>
-          <polyline points="12 6 12 12 16 14"></polyline>
-        </svg>
-        <span class="detail-text"
-          >Изменён: <span class="highlight">{formatDate(node.mtime)}</span
-          ></span
-        >
-      </div>
-      {#if node.isDir}
-        <div class="detail-item">
-          <svg
-            class="detail-icon"
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-            <circle cx="9" cy="7" r="4"></circle>
-            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-          </svg>
-          <span class="detail-text"
-            >Содержит: <span class="highlight"
-              >{node.childCount.toLocaleString("ru")} эл.</span
-            ></span
-          >
-        </div>
-      {/if}
-    </div>
+    <!-- Подробности (только в развёрнутом виде). `in:slide|global` — анимация
+         РАЗВОРОТА проигрывается при монтировании окна (в т.ч. при выборе нового
+         файла через {#key} в Scene). global — потому что блок истинен с создания
+         родителя, а локальный transition в таком случае Svelte подавляет. Только
+         on-enter: на закрытии/смене файла outro нет (иначе «схлопывание» старого
+         окна на месте нового). -->
+    {#if expanded}
+      <div class="expand" in:slide|global={{ duration: 220 }}>
+        <div class="divider"></div>
 
-    <!-- Предупреждение о необходимости очистки -->
-    {#if node.flags.includes("cleanupCandidate")}
-      <div class="cleanup-warning">
-        <svg
-          class="warning-icon"
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 24 24"
-          fill="currentColor"
-        >
-          <path
-            fill-rule="evenodd"
-            d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003ZM12 8.25a.75.75 0 0 1 .75.75v3.75a.75.75 0 0 1-1.5 0V9a.75.75 0 0 1 .75-.75Zm0 8.25a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"
-            clip-rule="evenodd"
-          />
-        </svg>
-        <span>Кандидат на очистку</span>
+        <div class="details-section">
+          <div class="detail-item">
+            <svg
+              class="detail-icon"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+            <span class="detail-text"
+              >Изменён: <span class="highlight">{formatDate(node.mtime)}</span
+              ></span
+            >
+          </div>
+          {#if node.isDir}
+            <div class="detail-item">
+              <svg
+                class="detail-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+              </svg>
+              <span class="detail-text"
+                >Содержит: <span class="highlight"
+                  >{node.childCount.toLocaleString("ru")} эл.</span
+                ></span
+              >
+            </div>
+          {/if}
+        </div>
+
+        {#if node.flags.includes("cleanupCandidate")}
+          <div class="cleanup-warning">
+            <svg
+              class="warning-icon"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003ZM12 8.25a.75.75 0 0 1 .75.75v3.75a.75.75 0 0 1-1.5 0V9a.75.75 0 0 1 .75-.75Zm0 8.25a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+            <span>Кандидат на очистку</span>
+          </div>
+        {/if}
+
+        <div class="path-container" title={node.path}>
+          <span class="path-label">Путь</span>
+          <div class="path-text">{node.path}</div>
+        </div>
+
+        <div class="actions">
+          <button class="reveal-btn" onclick={() => onReveal(node.path)}>
+            <svg
+              class="btn-icon"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"
+              ></path>
+              <polyline points="15 3 21 3 21 9"></polyline>
+              <line x1="10" y1="14" x2="21" y2="3"></line>
+            </svg>
+            <span>Показать в проводнике</span>
+          </button>
+        </div>
       </div>
     {/if}
-
-    <!-- Полный путь к файлу в специальном блоке с прокруткой -->
-    <div class="path-container" title={node.path}>
-      <span class="path-label">Путь</span>
-      <div class="path-text">{node.path}</div>
-    </div>
-
-    <!-- Кнопки действий -->
-    <div class="actions">
-      <button class="reveal-btn" onclick={() => node && onReveal(node.path)}>
-        <svg
-          class="btn-icon"
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"
-          ></path>
-          <polyline points="15 3 21 3 21 9"></polyline>
-          <line x1="10" y1="14" x2="21" y2="3"></line>
-        </svg>
-        <span>Показать в проводнике</span>
-      </button>
-    </div>
   </div>
-{/if}
+
+  <!-- Хвостик-указатель к зданию: тот же материал, что и корпус (цвет/прозрач-
+       ность из --overlay + бордюр), остриё лишь чуть скруглено. Вынесён ИЗ
+       .card — иначе вложенный backdrop-filter не размывает сцену и выглядит
+       плоско-тёмным поверх яркого здания. -->
+  <div class="arrow"></div>
+</div>
 
 <style>
-  /* Матовая «премиум-пластик» карточка (Nothing), скруглённая, акцент — красный. */
-  .card {
-    pointer-events: auto;
+  /* Обёртка: позиционный контекст для стрелки-сестры (вне .card, чтобы её
+     backdrop-filter не был вложен в blur корпуса). Размер — по корпусу. */
+  .card-wrap {
     position: relative;
-    min-width: 14rem;
+    display: inline-block;
+  }
+
+  /* Матовая «премиум-пластик» карточка (Nothing), скруглённая, акцент — красный.
+     pointer-events включаются только в развёрнутом виде: компактный hover-вид
+     пассивен (не перехватывает курсор/клик по зданию под ним). */
+  .card {
+    pointer-events: none;
+    position: relative;
+    min-width: 15rem;
     max-width: 24rem;
-    width: max-content;
     box-sizing: border-box;
     padding: 0.9rem 1.05rem;
     background: var(--overlay);
@@ -223,11 +248,15 @@
       box-shadow var(--motion-base) var(--ease-out),
       border-color var(--motion-base) var(--ease-out);
   }
-  .card:hover {
+  .card.expanded {
+    pointer-events: auto;
+  }
+  .card.expanded:hover {
     border-color: rgba(255, 255, 255, 0.2);
   }
 
-  /* Стрелка-хвостик вниз к зданию. */
+  /* Хвостик-указатель к зданию: тот же материал, что корпус (--overlay + бордюр,
+     та же прозрачность), повёрнутый квадрат — остриё лишь чуть скруглено. */
   .arrow {
     position: absolute;
     bottom: -6px;
@@ -240,6 +269,7 @@
     -webkit-backdrop-filter: blur(var(--blur));
     border-right: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
+    border-bottom-right-radius: 3px;
     z-index: -1;
     pointer-events: none;
   }
@@ -313,12 +343,12 @@
     gap: 1rem;
   }
   .info-row {
-    margin-bottom: 0.65rem;
+    margin-top: 0.55rem;
   }
-  /* Размер — крупно, dot-matrix (фирменный KPI). */
+  /* Размер — крупно, dot-matrix (фирменный KPI, виден и в компактном виде). */
   .size {
     font-family: var(--font-display);
-    font-size: 1.1rem;
+    font-size: 1.5rem;
     letter-spacing: 0.02em;
     color: var(--text);
   }
@@ -332,6 +362,11 @@
     border: 1px solid;
     letter-spacing: 0.01em;
     white-space: nowrap;
+  }
+
+  /* Блок подробностей — появляется/скрывается slide-анимацией. */
+  .expand {
+    overflow: hidden;
   }
 
   .details-section {

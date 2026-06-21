@@ -28,11 +28,14 @@
 import {
   BoxGeometry,
   type Camera,
+  CircleGeometry,
   Color,
   ConeGeometry,
+  Float32BufferAttribute,
   Group,
   InstancedMesh,
   Matrix4,
+  type Material,
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
@@ -52,8 +55,30 @@ import { layoutToWorld, type TreemapRect } from "./layoutToWorld";
 
 /** Каноническая сторона уровня-владельца (мировые единицы): бо́льшая сторона. */
 export const CITY_SPAN = 200;
-/** Отступ между соседними прямоугольниками (padded treemap) — зазоры-«дороги». */
-const TILE_PADDING = 1.5;
+/**
+ * Зазор-«дорога» МЕЖДУ районами (широкий) и зазор между домами ВНУТРИ района
+ * (плотный). Депт-зависимый padding: дороги читаются как разметка, а застройка
+ * внутри района остаётся плотной (vision §II.3). Дорога должна вмещать ~2 шага
+ * dot-grid (`ROAD_DOT_CELL`), иначе сетка выглядит как набор точек, а не улица.
+ */
+const ROAD_WIDTH = 9;
+const BUILDING_GAP = 0.6;
+/**
+ * Дороги — точечные «бордюры» вокруг блоков (точки из геометрии раскладки, не из
+ * мировой решётки): по периметру каждого блока, равномерно вдоль стороны, с
+ * яркими точками на углах-перекрёстках. Вокруг города — равномерное поле-апрон,
+ * гаснущее по расстоянию от края города (не по камере).
+ */
+const CURB_OFFSET = 1.4; // вынос бордюра в зазор от грани блока
+const CURB_STEP = 4; // шаг точек вдоль стороны блока
+const CURB_DOT_ALPHA = 0.16; // яркость точки бордюра (смешение с белым)
+const CORNER_DOT_ALPHA = 0.26; // яркость точки-перекрёстка (угол)
+const CORNER_SCALE = 1.7; // во сколько крупнее точка-перекрёсток
+const DOT_R = 0.55; // базовый радиус точки, мир
+const GROUND_APRON = 3; // во сколько раз земля больше города
+const GROUND_EDGE_COLOR = 0x080808; // = --bg: к нему гаснут земля и сетка у краёв
+const APRON_STEP = 6; // шаг сетки-поля вокруг города
+const APRON_DOT_ALPHA = 0.12; // базовая яркость точки поля (до угасания)
 /** Внешний отступ детей от рамки района — читаемая граница плота. */
 const DISTRICT_PAD = 1.0;
 /** Верхняя полоса района (рамка/«крыша») сверх внешнего отступа. */
@@ -218,7 +243,10 @@ function layoutNested(
   const laidOut = treemap<TreeDatum>()
     .tile(treemapSquarify)
     .size([span.w, span.d])
-    .paddingInner(TILE_PADDING)
+    // Депт-зависимый зазор: корень (между районами) — широкая дорога; район
+    // (между его домами) — плотная застройка. paddingInner(node) оценивается на
+    // РОДИТЕЛЕ и разделяет его детей.
+    .paddingInner((node) => (node.depth === 0 ? ROAD_WIDTH : BUILDING_GAP))
     .paddingOuter(DISTRICT_PAD)
     .paddingTop(DISTRICT_PAD_TOP)(root);
 
@@ -301,17 +329,17 @@ export function buildLevel(
 ): Level {
   const group = new Group();
 
-  // Земля под городом — нейтральный тинт, чтобы город «стоял» на плоскости.
-  const ground = new Mesh(
-    new PlaneGeometry(span.w * 1.1, span.d * 1.1),
-    new MeshLambertMaterial({ color: new Color(GROUND_COLOR) }),
-  );
-  ground.rotation.x = -Math.PI / 2; // в плоскость XZ
-  ground.position.y = -0.01; // чуть ниже основания зданий
-  group.add(ground);
-
   const nowSeconds = Math.floor(Date.now() / 1000);
   const { districts, buildings } = layoutNested(nodes, span, nowSeconds);
+
+  // Земля — большой матовый «апрон» вокруг города с радиальным угасанием цвета к
+  // краям (город не висит в вакууме). Дороги — отдельный слой точек-«бордюров»
+  // вокруг блоков + поле-сетка на апроне; оба строятся ПОСЛЕ раскладки, т.к.
+  // нужны прямоугольники блоков. В декоре оба прячутся (см. applyDecor).
+  const ground = makeFadedGround(span);
+  group.add(ground);
+  const roadDots = buildRoadDots(span, districts, buildings);
+  group.add(roadDots);
 
   const dummy = new Object3D();
   const color = new Color();
@@ -514,6 +542,7 @@ export function buildLevel(
    * `excludedIdx` (ставшего активным уровнем) скрыт — иначе он накрыл бы активный. */
   function applyDecor(): void {
     ground.visible = false;
+    roadDots.visible = false;
     if (buildingMesh) {
       buildingMesh.visible = true;
       // Скрываем внутренние здания исключённого района (чтобы не перекрывали активный уровень),
@@ -567,6 +596,7 @@ export function buildLevel(
   /** Вернуть активный облик: всё видимо, материал плотный, LOD снова работает. */
   function applyActive(): void {
     ground.visible = true;
+    roadDots.visible = true;
     if (buildingMesh) {
       buildingMesh.visible = true;
       const mat = buildingMesh.material as MeshLambertMaterial;
@@ -698,15 +728,181 @@ function buildCleanupMarkers(
   return markers;
 }
 
-/** Освободить GPU-ресурсы группы (geometry/material всех мешей) и очистить её. */
+/** clamp+smoothstep на [0,1] — мягкая интерполяция для радиального угасания. */
+function smoothstep01(t: number): number {
+  const x = t < 0 ? 0 : t > 1 ? 1 : t;
+  return x * x * (3 - 2 * x);
+}
+
+/** Радиальное «t» угасания земли/сетки: 0 в центре города, 1 — к краю апрона. */
+function groundFade(x: number, z: number, half: number): number {
+  const r = Math.min(1, Math.hypot(x, z) / half);
+  return smoothstep01((r - 0.35) / 0.6);
+}
+
+/**
+ * Земля-«апрон»: большой матовый план вокруг города (×GROUND_APRON), цвет
+ * радиально гаснет к краям из `GROUND_COLOR` в `GROUND_EDGE_COLOR` (=--bg) через
+ * vertex-colors — у города нет «парящего» острого края, он тает в фон.
+ */
+function makeFadedGround(span: LevelSpan): Mesh {
+  const S = Math.max(span.w, span.d) * GROUND_APRON;
+  const geo = new PlaneGeometry(S, S, 48, 48);
+  const base = new Color(GROUND_COLOR);
+  const edge = new Color(GROUND_EDGE_COLOR);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+  const half = S / 2;
+  const c = new Color();
+  for (let i = 0; i < pos.count; i++) {
+    // План ещё не повёрнут: локальные (x,y) → мировые (x,z) после rotateX(-90°).
+    const t = groundFade(pos.getX(i), pos.getY(i), half);
+    c.copy(base).lerp(edge, t);
+    colors[i * 3] = c.r;
+    colors[i * 3 + 1] = c.g;
+    colors[i * 3 + 2] = c.b;
+  }
+  geo.setAttribute("color", new Float32BufferAttribute(colors, 3));
+  const ground = new Mesh(geo, new MeshLambertMaterial({ vertexColors: true }));
+  ground.rotation.x = -Math.PI / 2; // в плоскость XZ
+  ground.position.y = -0.01; // чуть ниже основания зданий
+  return ground;
+}
+
+/** Одна точка дороги: позиция (мир XZ), масштаб и «яркость» (смешение с белым). */
+interface DotSpec {
+  x: number;
+  z: number;
+  scale: number;
+  alpha: number;
+}
+
+/** Точки по периметру блока (бордюр): углы — ярко/крупно, стороны — равномерно. */
+function addCurbDots(dots: DotSpec[], r: TreemapRect): void {
+  const x0 = r.x0 - CURB_OFFSET;
+  const x1 = r.x1 + CURB_OFFSET;
+  const z0 = r.y0 - CURB_OFFSET; // treemap-y → world-z
+  const z1 = r.y1 + CURB_OFFSET;
+  // Углы-перекрёстки.
+  for (const [cx, cz] of [
+    [x0, z0],
+    [x1, z0],
+    [x1, z1],
+    [x0, z1],
+  ]) {
+    dots.push({ x: cx, z: cz, scale: CORNER_SCALE, alpha: CORNER_DOT_ALPHA });
+  }
+  // Промежуточные точки сторон (без концов — углы уже добавлены).
+  const side = (
+    a0: number,
+    a1: number,
+    fixed: number,
+    horizontal: boolean,
+  ): void => {
+    const len = a1 - a0;
+    const n = Math.floor(len / CURB_STEP);
+    if (n < 2) return;
+    const step = len / n;
+    for (let k = 1; k < n; k++) {
+      const a = a0 + k * step;
+      dots.push(
+        horizontal
+          ? { x: a, z: fixed, scale: 1, alpha: CURB_DOT_ALPHA }
+          : { x: fixed, z: a, scale: 1, alpha: CURB_DOT_ALPHA },
+      );
+    }
+  };
+  side(x0, x1, z0, true); // низ
+  side(x0, x1, z1, true); // верх
+  side(z0, z1, x0, false); // лево
+  side(z0, z1, x1, false); // право
+}
+
+/**
+ * Слой точек-дорог: бордюры вокруг блоков верхнего уровня (районы + файлы) +
+ * равномерное поле-сетка на апроне, гаснущее по расстоянию от края города.
+ * Один `InstancedMesh` с per-instance цветом; цвет точки = локальный цвет земли,
+ * подмешанный к белому на её «яркость», так далёкие точки тают вместе с землёй.
+ */
+function buildRoadDots(
+  span: LevelSpan,
+  districts: DistrictAcc[],
+  buildings: BuildingAcc[],
+): InstancedMesh {
+  const dots: DotSpec[] = [];
+
+  // 1) Бордюры вокруг блоков верхнего уровня (районы + файлы верхнего уровня;
+  //    вложенные превью внутри районов — не блоки, у них нет дорог).
+  for (const d of districts) addCurbDots(dots, d.rect);
+  for (const b of buildings) {
+    if (b.districtIdx === null) addCurbDots(dots, b.rect);
+  }
+
+  // 2) Поле-сетка вокруг города; точки внутри города опускаем (там бордюры).
+  const cityHalfW = span.w / 2;
+  const cityHalfD = span.d / 2;
+  const S = Math.max(span.w, span.d) * GROUND_APRON;
+  const half = S / 2;
+  const falloff = Math.max(span.w, span.d); // угасание за ~ширину города
+  const skipW = cityHalfW + CURB_OFFSET * 2;
+  const skipD = cityHalfD + CURB_OFFSET * 2;
+  for (let x = -half; x <= half; x += APRON_STEP) {
+    for (let z = -half; z <= half; z += APRON_STEP) {
+      if (Math.abs(x) < skipW && Math.abs(z) < skipD) continue; // город
+      const dx = Math.max(0, Math.abs(x) - cityHalfW);
+      const dz = Math.max(0, Math.abs(z) - cityHalfD);
+      const fade = 1 - Math.hypot(dx, dz) / falloff;
+      if (fade <= 0.02) continue; // далёкие невидимые точки не создаём
+      dots.push({ x, z, scale: 1, alpha: APRON_DOT_ALPHA * fade });
+    }
+  }
+
+  // Собираем InstancedMesh. Точка — плоский кружок (CircleGeometry в XY),
+  // кладём в XZ поворотом и масштабируем под «яркость»/угол на матрице инстанса.
+  const mesh = new InstancedMesh(
+    new CircleGeometry(DOT_R, 10),
+    new MeshBasicMaterial(),
+    dots.length,
+  );
+  const dummy = new Object3D();
+  const base = new Color(GROUND_COLOR);
+  const edge = new Color(GROUND_EDGE_COLOR);
+  const white = new Color(0xffffff);
+  const col = new Color();
+  for (let i = 0; i < dots.length; i++) {
+    const d = dots[i];
+    dummy.position.set(d.x, 0.02, d.z); // чуть выше земли — без z-fight
+    dummy.rotation.set(-Math.PI / 2, 0, 0);
+    dummy.scale.setScalar(d.scale);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+    // Цвет = локальный цвет земли (с тем же радиальным угасанием) → белый на alpha.
+    col
+      .copy(base)
+      .lerp(edge, groundFade(d.x, d.z, half))
+      .lerp(white, d.alpha);
+    mesh.setColorAt(i, col);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  mesh.frustumCulled = false; // апрон широкий — не отсекать целиком по bbox
+  return mesh;
+}
+
+/** Освободить GPU-ресурсы группы (geometry/material/текстуры) и очистить её. */
 function disposeGroup(group: Group): void {
+  const disposeMat = (m: Material): void => {
+    const tex = (m as MeshLambertMaterial).map;
+    if (tex) tex.dispose(); // текстура земли (dot-grid)
+    m.dispose();
+  };
   for (const child of [...group.children]) {
     group.remove(child);
     if (child instanceof InstancedMesh || child instanceof Mesh) {
       child.geometry.dispose();
       const mat = child.material;
-      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-      else mat.dispose();
+      if (Array.isArray(mat)) mat.forEach(disposeMat);
+      else disposeMat(mat);
     }
   }
 }
