@@ -7,6 +7,7 @@
   import Legend from "./Legend.svelte";
   import StatusOverlay from "./StatusOverlay.svelte";
   import NodeCard from "./NodeCard.svelte";
+  import FilterPanel from "./FilterPanel.svelte";
   import {
     setupInteraction,
     type InteractionController,
@@ -26,6 +27,8 @@
     hoveredNode,
     selectedNode,
     breadcrumbs,
+    candidateFilter,
+    type CandidateFilter,
   } from "../store/mode";
   import type { ScanNode, ScanProgress } from "../ipc/contract";
 
@@ -56,6 +59,22 @@
   /** Грубое форматирование байтов в ГБ для панели прогресса. */
   function formatGB(bytes: number): string {
     return `${(bytes / 1e9).toFixed(2)} ГБ`;
+  }
+
+  /** Построить предикат подсветки из фильтра; `null`, если критериев нет (подсветка
+   * снимается). Все условия — конъюнкция (см. `CandidateFilter`). */
+  function buildMatch(f: CandidateFilter): ((n: ScanNode) => boolean) | null {
+    const on = f.onlyCandidates || f.minSize > 0 || f.olderThanDays > 0;
+    if (!on) return null;
+    const now = Date.now() / 1000;
+    const olderThan = f.olderThanDays * 86400; // дни → секунды (0 = выкл)
+    return (n) => {
+      if (f.onlyCandidates && !n.flags.includes("cleanupCandidate"))
+        return false;
+      if (f.minSize > 0 && n.size < f.minSize) return false;
+      if (olderThan > 0 && now - n.mtime < olderThan) return false;
+      return true;
+    };
   }
 
   /** Имя уровня из пути для крошки (последний сегмент, или сам путь). */
@@ -121,6 +140,12 @@
     };
     window.addEventListener("keydown", onKey);
 
+    // Фильтр-подсветка: стор → предикат → навигатор (он переживает навигацию).
+    // subscribe срабатывает сразу с текущим значением — nav уже создан выше.
+    const offFilter = candidateFilter.subscribe((f) => {
+      nav?.applyHighlight(buildMatch(f));
+    });
+
     // Стрим прогресса скана с бэка (троттлинг там же) → низкочастотный стор.
     let unlisten: UnlistenFn | undefined;
     listen<ScanProgress>("scan://progress", (e) => {
@@ -157,6 +182,7 @@
       offLod();
       offFrame();
       offCard();
+      offFilter();
       window.removeEventListener("keydown", onKey);
       unlisten?.();
       interaction?.dispose();
@@ -313,6 +339,8 @@
        читает только палитру; во время скана прячем, чтобы не мешать прогрессу. -->
   {#if !busy}
     <Legend />
+    <!-- Фильтр-подсветка кандидатов (DoD): пишет в стор, рендер гасит остальное. -->
+    <FilterPanel />
   {/if}
 
   <!-- Центральный оверлей состояний (приветствие/пусто/ошибка/отмена). Сам

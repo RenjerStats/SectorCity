@@ -60,6 +60,12 @@ export interface CityNavigator {
   up(ms: number): Promise<void>;
   /** Покадрово: LOD активного уровня по позиции камеры. */
   updateLOD(): void;
+  /**
+   * Подсветка-фильтр: применить предикат к активному уровню и запомнить его —
+   * навигатор переприменяет его при каждой смене активного (drill/up/reset), так
+   * что фильтр «переживает» навигацию. `null` — снять подсветку.
+   */
+  applyHighlight(match: ((node: ScanNode) => boolean) | null): void;
   /** Освободить все уровни. */
   dispose(): void;
 }
@@ -68,6 +74,8 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
   const content = handle.content;
   let active: Level | null = null;
   let decor: Level | null = null;
+  // Текущий предикат подсветки-фильтра; переприменяется при смене активного.
+  let currentMatch: ((node: ScanNode) => boolean) | null = null;
 
   function setActiveView(level: Level | null): void {
     content.userData.activeView = level ? level.view : null;
@@ -88,6 +96,7 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     // Корень/прыжок: квадратный канонический холст.
     active = buildLevel(nodes, { w: CITY_SPAN, d: CITY_SPAN }, path);
     content.add(active.group);
+    active.setHighlight(currentMatch); // фильтр переживает пересборку уровня
     setActiveView(active);
     setInteractive(true);
     handle.placeCamera(INITIAL_CAMERA_POS, INITIAL_TARGET);
@@ -117,12 +126,14 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
       // origin shift в кадре завершения (см. шапку): следующий render нормирован.
       const next = buildLevel(childNodes, spanFromPlacement(g), node.path);
       content.add(next.group); // канонически, identity
+      next.setHighlight(currentMatch); // фильтр переживает drill
 
       // Старый активный → декор в `G⁻¹` (раздут, выглядывает по краям). Силуэт
       // самого района `node` скрываем — иначе он накрыл бы новый активный уровень.
       const inv = inverseGroupTransform(g);
       fromActive.group.scale.setScalar(inv.scale);
       fromActive.group.position.copy(inv.position);
+      fromActive.setHighlight(null); // декор — нейтральный контекст, без подсветки
       fromActive.setDecor(node.path);
 
       // Лимит 2 уровня: старый декор больше не нужен.
@@ -165,6 +176,7 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
       parent.group.position.set(0, 0, 0);
       parent.group.scale.setScalar(1);
       parent.setActive();
+      parent.setHighlight(currentMatch); // фильтр переживает подъём
 
       active = parent;
       // Деда как контекст-декор не достраиваем: его аспект зависит от пра-деда
@@ -181,6 +193,11 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     active?.view.updateLOD(handle.camera);
   }
 
+  function applyHighlight(match: ((node: ScanNode) => boolean) | null): void {
+    currentMatch = match;
+    active?.setHighlight(match);
+  }
+
   function dispose(): void {
     if (active) disposeLevel(active);
     if (decor) disposeLevel(decor);
@@ -190,5 +207,5 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     setInteractive(false);
   }
 
-  return { reset, drill, canUp, up, updateLOD, dispose };
+  return { reset, drill, canUp, up, updateLOD, applyHighlight, dispose };
 }

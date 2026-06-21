@@ -45,6 +45,18 @@ pub fn is_cleanup_dir(name: &str) -> bool {
     data::CLEANUP_DIR_NAMES.iter().any(|&n| n == lower)
 }
 
+/// Порог «крупного» файла для эвристики очистки (байты).
+pub const STALE_LARGE_MIN_SIZE: u64 = 100 * 1024 * 1024; // 100 МБ
+/// Порог «давности» для эвристики очистки (секунды).
+pub const STALE_AGE_SECONDS: i64 = 180 * 24 * 3600; // ~6 месяцев
+
+/// Файл — кандидат на очистку по эвристике «крупный И давно не трогался».
+/// База давности — `mtime` (atime недостоверен, ТЗ §5.9). `mtime`/`now` —
+/// unix-секунды. Папки сюда не попадают: для них работает `is_cleanup_dir`.
+pub fn is_stale_large_file(size: u64, mtime: i64, now: i64) -> bool {
+    size >= STALE_LARGE_MIN_SIZE && now.saturating_sub(mtime) >= STALE_AGE_SECONDS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +89,19 @@ mod tests {
         assert!(is_cleanup_dir("Node_Modules"));
         assert!(is_cleanup_dir("__pycache__"));
         assert!(!is_cleanup_dir("src"));
+    }
+
+    #[test]
+    fn stale_large_file_heuristic() {
+        let now = 1_000_000_000;
+        let big = STALE_LARGE_MIN_SIZE;
+        let old = now - STALE_AGE_SECONDS;
+        // Крупный И старый → кандидат.
+        assert!(is_stale_large_file(big, old, now));
+        // Крупный, но свежий → нет.
+        assert!(!is_stale_large_file(big, now, now));
+        // Старый, но мелкий → нет.
+        assert!(!is_stale_large_file(1024, old, now));
     }
 
     #[test]

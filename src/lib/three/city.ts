@@ -67,6 +67,8 @@ const MAX_AGE_SECONDS = 3 * 365 * 24 * 3600; // ~3 года
 const MIN_VALUE = 1;
 /** Высота плиты-плота района (тонкая подложка под вложенные здания). */
 const PLOT_HEIGHT = 2;
+/** Множитель затемнения несовпадающих с фильтром/поиском узлов (подсветка). */
+export const DIM_FACTOR = 0.12;
 
 /** Дистанции LOD камера→центр района (гистерезис против мерцания на границе). */
 const NEAR_ENTER = 130; // ближе этого — район раскрывается во вложенные здания
@@ -145,6 +147,14 @@ export interface Level {
   setDecor(excludePath?: string): void;
   /** Переключить облик: активный (полный рендер + LOD + пикинг). */
   setActive(): void;
+  /**
+   * Подсветка-фильтр (фаза 2, DoD «кандидаты одним взглядом»): несовпадающие с
+   * предикатом узлы гасятся домножением per-instance цвета на `DIM_FACTOR`,
+   * совпадающие остаются в полном цвете → «сцена в тень, совпадения светятся».
+   * `null` — снять подсветку (вернуть базовые цвета). Канал цвета не подменяется,
+   * только притеняется (палитра категорий сохраняется).
+   */
+  setHighlight(match: ((node: ScanNode) => boolean) | null): void;
   /** Освободить GPU-ресурсы (geometry/material всех мешей). */
   dispose(): void;
 }
@@ -405,6 +415,12 @@ export function buildLevel(
       coarseReal[j] = dummy.matrix.clone();
       coarseMesh!.setMatrixAt(j, dummy.matrix); // старт: далёкий → силуэт виден
 
+      // Per-instance цвет плота/силуэта = белый: произведение с material.color
+      // даёт DISTRICT_PLOT_COLOR (декор домножает material.color — не ломается),
+      // зато подсветка-фильтр может притенять отдельные районы (setHighlight).
+      plotMesh!.setColorAt(j, color.set(0xffffff));
+      coarseMesh!.setColorAt(j, color.set(0xffffff));
+
       districtPick[j] = { node: d.node, drillTarget: d.node };
       districtIndexByPath.set(d.node.path, j);
       placements.set(d.node.path, {
@@ -425,6 +441,8 @@ export function buildLevel(
     });
     plotMesh.instanceMatrix.needsUpdate = true;
     coarseMesh.instanceMatrix.needsUpdate = true;
+    if (plotMesh.instanceColor) plotMesh.instanceColor.needsUpdate = true;
+    if (coarseMesh.instanceColor) coarseMesh.instanceColor.needsUpdate = true;
     group.add(plotMesh);
     group.add(coarseMesh);
   }
@@ -618,6 +636,33 @@ export function buildLevel(
       isDecor = false;
       excludedIdx = null; // вернётся в активный — все силуэты снова в игре (LOD)
       applyActive();
+    },
+    setHighlight(match) {
+      // Здания: база — цвет категории (папка-превью → структурный цвет плота).
+      if (buildingMesh) {
+        buildings.forEach((b, i) => {
+          const base = b.node.isDir
+            ? DISTRICT_PLOT_COLOR
+            : CATEGORY_COLOR[b.node.category];
+          color.set(base);
+          if (match && !match(b.node)) color.multiplyScalar(DIM_FACTOR);
+          buildingMesh!.setColorAt(i, color);
+        });
+        if (buildingMesh.instanceColor)
+          buildingMesh.instanceColor.needsUpdate = true;
+      }
+      // Районы (плот + силуэт): база — белый (см. инициализацию выше).
+      if (plotMesh && coarseMesh) {
+        districts.forEach((d, j) => {
+          color.setRGB(1, 1, 1);
+          if (match && !match(d.node)) color.multiplyScalar(DIM_FACTOR);
+          plotMesh!.setColorAt(j, color);
+          coarseMesh!.setColorAt(j, color);
+        });
+        if (plotMesh.instanceColor) plotMesh.instanceColor.needsUpdate = true;
+        if (coarseMesh.instanceColor)
+          coarseMesh.instanceColor.needsUpdate = true;
+      }
     },
     dispose() {
       disposeGroup(group);

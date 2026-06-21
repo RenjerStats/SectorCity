@@ -57,6 +57,33 @@ export const hoveredNode = atom<ScanNode | null>(null);
  */
 export const selectedNode = atom<ScanNode | null>(null);
 
+/**
+ * Фильтр-подсветка кандидатов (фаза 2, DoD «лучшие кандидаты одним взглядом»).
+ * Несовпадающие узлы гасятся в рендере (`navigator.applyHighlight`), совпадающие
+ * «светятся». Все условия — конъюнкция; нулевое значение = условие выключено.
+ */
+export interface CandidateFilter {
+  /** Только узлы с флагом `cleanupCandidate`. */
+  onlyCandidates: boolean;
+  /** Минимальный размер, байты (0 — выключено). */
+  minSize: number;
+  /** Старше N дней по `mtime` (0 — выключено). */
+  olderThanDays: number;
+}
+
+/** Текущий фильтр кандидатов. Старт — всё выключено (подсветки нет). */
+export const candidateFilter = atom<CandidateFilter>({
+  onlyCandidates: false,
+  minSize: 0,
+  olderThanDays: 0,
+});
+
+/** Активен ли хоть один критерий фильтра (для индикации в UI). */
+export const filterActive = computed(
+  candidateFilter,
+  (f) => f.onlyCandidates || f.minSize > 0 || f.olderThanDays > 0,
+);
+
 /** Один шаг навигации (хлебная крошка): путь уровня и его имя. */
 export interface Crumb {
   path: string;

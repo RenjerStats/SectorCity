@@ -313,6 +313,9 @@ pub fn scan_with(
     let mut bytes_seen: u64 = 0;
     let mut last_emit = Instant::now();
 
+    // «Сейчас» в unix-секундах — один раз на скан (эвристика «давность» очистки).
+    let now = to_unix(SystemTime::now());
+
     for entry in walker {
         // Отмена проверяется на каждом входе — обход прекращается немедленно.
         if cancel.is_cancelled() {
@@ -352,7 +355,13 @@ pub fn scan_with(
             .unwrap_or_else(|| clean_path.to_string_lossy().into_owned());
 
         let category = crate::classify::classify(&clean_path, is_dir);
-        let is_cleanup = is_dir && crate::classify::is_cleanup_dir(&name);
+        // Кандидат на очистку: для папок — известный кэш/мусор по имени; для
+        // файлов — эвристика «крупный и давно не трогался» (P1, фаза 2).
+        let is_cleanup = if is_dir {
+            crate::classify::is_cleanup_dir(&name)
+        } else {
+            crate::classify::is_stale_large_file(size, mtime, now)
+        };
 
         let depth = entry.depth();
         index.insert(raw_path.clone(), nodes.len());

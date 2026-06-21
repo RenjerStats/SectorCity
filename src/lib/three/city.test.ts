@@ -11,8 +11,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { Color, PerspectiveCamera } from "three";
-import { buildLevel, CITY_SPAN } from "./city";
-import { DISTRICT_PLOT_COLOR } from "./palette";
+import { buildLevel, CITY_SPAN, DIM_FACTOR } from "./city";
+import { CATEGORY_COLOR, DISTRICT_PLOT_COLOR } from "./palette";
 import {
   dir,
   file,
@@ -124,6 +124,41 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
     // Силуэт /a снова в игре (LOD пересчитает по камере), пикинг доступен.
     expect(isHidden(matrixAt(coarse, idxA))).toBe(false);
     expect(level.view.pickMeshes().length).toBeGreaterThan(0);
+
+    level.dispose();
+  });
+
+  it("setHighlight: несовпадающие здания гаснут, совпадающие — в полном цвете", () => {
+    const level = buildLevel(rootNodes(), SPAN, "root");
+    const building = level.view.pickMeshes()[0];
+
+    const idxOf = (path: string): number | null => {
+      for (let i = 0; i < building.count; i++) {
+        const info = level.view.resolvePick(building, i);
+        if (info && info.node.path === path) return i;
+      }
+      return null;
+    };
+    const cIdx = idxOf("/c")!; // файл верхнего уровня (archive)
+    const aChildIdx = idxOf("/a/1")!; // вложенное превью (code)
+    expect(cIdx).not.toBeNull();
+    expect(aChildIdx).not.toBeNull();
+
+    // Подсветить только /c: оно — в полном цвете категории, /a/1 — притушено.
+    level.setHighlight((n) => n.path === "/c");
+    const col = new Color();
+    building.getColorAt(cIdx, col);
+    expect(col.getHex()).toBe(CATEGORY_COLOR.archive);
+    building.getColorAt(aChildIdx, col);
+    const dim = new Color(CATEGORY_COLOR.code).multiplyScalar(DIM_FACTOR);
+    expect(col.r).toBeCloseTo(dim.r);
+    expect(col.g).toBeCloseTo(dim.g);
+    expect(col.b).toBeCloseTo(dim.b);
+
+    // Снятие подсветки возвращает базовый цвет категории.
+    level.setHighlight(null);
+    building.getColorAt(aChildIdx, col);
+    expect(col.getHex()).toBe(CATEGORY_COLOR.code);
 
     level.dispose();
   });
