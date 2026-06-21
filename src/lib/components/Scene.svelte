@@ -6,6 +6,7 @@
   import { createNavigator, type CityNavigator } from "../three/navigator";
   import Legend from "./Legend.svelte";
   import StatusOverlay from "./StatusOverlay.svelte";
+  import NodeCard from "./NodeCard.svelte";
   import {
     setupInteraction,
     type InteractionController,
@@ -18,10 +19,12 @@
     cancelScan,
     currentRoot,
   } from "../ipc/commands";
+  import { revealInExplorer } from "../ipc/actions";
   import {
     appMode,
     scanProgress,
     hoveredNode,
+    selectedNode,
     breadcrumbs,
   } from "../store/mode";
   import type { ScanNode, ScanProgress } from "../ipc/contract";
@@ -35,6 +38,9 @@
   let nav: CityNavigator | undefined;
   let interaction: InteractionController | undefined;
   let tooltipEl = $state<HTMLDivElement | undefined>(undefined);
+  // Обёртка карточки выбранного узла: позицию ставим императивно покадрово
+  // (как у тултипа), КОНТЕНТ карточки — реактивно из стора `selectedNode`.
+  let cardEl = $state<HTMLDivElement | undefined>(undefined);
 
   // Состояние центрального оверлея (приветствие/пусто/ошибка/отмена). Низко-
   // частотное — обычный $state; "none" = город виден, оверлей не рисуется.
@@ -77,6 +83,9 @@
     interaction = setupInteraction(handle, {
       onHover: (node) => hoveredNode.set(node),
       onDrill: (node) => void drill(node),
+      // Клик по файлу → карточка над зданием; клик мимо/по «Прочее» → null.
+      // Режим (appMode) не трогаем: карточка живёт на отдельном атоме, как hover.
+      onSelect: (node) => selectedNode.set(node),
     });
 
     // LOD активного уровня: покадрово по позиции камеры (дёшево, переключение
@@ -94,6 +103,23 @@
       tooltipEl.style.transform = `translate(-50%, -100%) translate(${s.x}px, ${s.y}px)`;
       tooltipEl.style.opacity = s.visible ? "1" : "0";
     });
+
+    // Позицию карточки выбранного узла — тоже покадрово императивно (docs §4).
+    // Контент уже отрисован реактивно (selectedNode); здесь только проекция.
+    const offCard = handle.onFrame(() => {
+      if (!cardEl || !handle || !interaction) return;
+      const anchor = interaction.selectionAnchor();
+      if (!anchor) return;
+      const s = handle.worldToScreen(anchor);
+      cardEl.style.transform = `translate(-50%, -100%) translate(${s.x}px, ${s.y}px)`;
+      cardEl.style.opacity = s.visible ? "1" : "0";
+    });
+
+    // ESC — снять выбор (закрыть карточку). Глобально, т.к. фокус на canvas.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") interaction?.clearSelection();
+    };
+    window.addEventListener("keydown", onKey);
 
     // Стрим прогресса скана с бэка (троттлинг там же) → низкочастотный стор.
     let unlisten: UnlistenFn | undefined;
@@ -130,6 +156,8 @@
     return () => {
       offLod();
       offFrame();
+      offCard();
+      window.removeEventListener("keydown", onKey);
       unlisten?.();
       interaction?.dispose();
       nav?.dispose();
@@ -144,6 +172,7 @@
     if (typeof root !== "string") return; // отмена диалога
 
     statusKind = "none"; // прячем оверлей на время скана
+    interaction?.clearSelection();
     appMode.set({ kind: "scanning", progress: 0 });
     scanProgress.set({
       entries: 0,
@@ -202,6 +231,7 @@
     if (!crumb || index === $breadcrumbs.length - 1) return;
     appMode.set({ kind: "zooming", from: "", to: crumb.path });
     hoveredNode.set(null);
+    interaction?.clearSelection(); // выбор уровня-источника больше не валиден
 
     if (index === $breadcrumbs.length - 2 && nav.canUp(crumb.path)) {
       await nav.up(DRILL_MS);
@@ -221,10 +251,24 @@
     handle?.resetView();
   }
 
+  /** «Показать в проводнике» из карточки. Ошибку (нет пути/прав) глушим в лог. */
+  async function revealNode(path: string) {
+    try {
+      await revealInExplorer(path);
+    } catch (err) {
+      console.warn("показать в проводнике не удалось:", err);
+    }
+  }
+  /** Закрыть карточку (снять выбор) — через слой взаимодействия (он чистит Hit). */
+  function closeCard() {
+    interaction?.clearSelection();
+  }
+
   let busy = $derived($appMode.kind === "scanning");
   let zooming = $derived($appMode.kind === "zooming");
   let progress = $derived($scanProgress);
   let hovered = $derived($hoveredNode);
+  let selected = $derived($selectedNode);
   let crumbs = $derived($breadcrumbs);
 </script>
 
@@ -292,6 +336,14 @@
         <div class="cleanup">⚑ кандидат на очистку</div>
       {/if}
       <div class="path">{hovered.path}</div>
+    </div>
+  {/if}
+
+  <!-- Карточка выбранного узла (режим SELECT). Обёртку позиционируем
+       императивно покадрово (см. onFrame выше); контент — реактивно из стора. -->
+  {#if selected}
+    <div class="card-anchor" bind:this={cardEl}>
+      <NodeCard onReveal={revealNode} onClose={closeCard} />
     </div>
   {/if}
 </div>
@@ -381,6 +433,17 @@
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 0.4rem;
     white-space: nowrap;
+  }
+
+  .card-anchor {
+    position: absolute;
+    top: 0;
+    left: 0;
+    /* Позиция/видимость — императивно покадрово (см. onFrame); до первого кадра
+       прячем. pointer-events на самой карточке (она внутри) включены. */
+    opacity: 0;
+    pointer-events: none;
+    z-index: 2;
   }
 
   .tooltip {

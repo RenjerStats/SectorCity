@@ -129,11 +129,7 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
   });
 
   it("папки на превью (depth 2) окрашиваются в DISTRICT_PLOT_COLOR", () => {
-    const nodes = [
-      dir("/a", [
-        dir("/a/sub", [file("/a/sub/1", 100, "code")])
-      ])
-    ];
+    const nodes = [dir("/a", [dir("/a/sub", [file("/a/sub/1", 100, "code")])])];
     const level = buildLevel(nodes, SPAN, "root");
     const building = level.view.pickMeshes()[0]; // buildingMesh
 
@@ -172,7 +168,9 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
 
     const plotMat = plot.material as any;
     expect(plotMat.transparent).toBe(false);
-    const expectedPlotColor = new Color(DISTRICT_PLOT_COLOR).multiplyScalar(0.35);
+    const expectedPlotColor = new Color(DISTRICT_PLOT_COLOR).multiplyScalar(
+      0.35,
+    );
     expect(plotMat.color.r).toBeCloseTo(expectedPlotColor.r);
     expect(plotMat.color.g).toBeCloseTo(expectedPlotColor.g);
     expect(plotMat.color.b).toBeCloseTo(expectedPlotColor.b);
@@ -180,4 +178,3 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
     level.dispose();
   });
 });
-

@@ -34,14 +34,21 @@ export interface InteractionCallbacks {
   onHover(node: ScanNode | null): void;
   /** Клик по району (папке) → drill (бесшовный зум считает навигатор сам). */
   onDrill(node: ScanNode): void;
+  /** Клик по зданию-файлу → SELECT (карточка над зданием); `null` = снять выбор
+   *  (клик мимо зданий). Район уходит в `onDrill`, синтетическое «Прочее» — никуда. */
+  onSelect(node: ScanNode | null): void;
 }
 
 /** Управление слоем взаимодействия. */
 export interface InteractionController {
   /** Якорь тултипа — верх центра наведённого здания в мире, либо `null`. */
   hoverAnchor(): Vector3 | null;
+  /** Якорь карточки — верх центра выбранного здания в мире, либо `null`. */
+  selectionAnchor(): Vector3 | null;
   /** Сбросить наведение (напр. после смены уровня). */
   clearHover(): void;
+  /** Снять выбор (напр. при drill/смене уровня). Шлёт `onSelect(null)`. */
+  clearSelection(): void;
   /** Снять слушатели и освободить ресурсы highlight-mesh. */
   dispose(): void;
 }
@@ -64,6 +71,7 @@ export function setupInteraction(
   let pointerInside = false;
   let dirty = false; // указатель сдвинулся — нужен пересчёт на следующем кадре
   let hovered: Hit | null = null;
+  let selected: Hit | null = null;
   let down: { x: number; y: number } | null = null;
 
   // Один highlight-mesh: рёбра единичного бокса, трансформ = матрица инстанса.
@@ -168,15 +176,35 @@ export function setupInteraction(
     const view = activeView(handle.content);
     if (!view) return;
     const hit = hovered ?? raycastHit();
-    if (!hit) return;
+    if (!hit) {
+      setSelected(null); // клик по пустому месту — снять выбор
+      return;
+    }
     const info = view.resolvePick(hit.mesh, hit.id);
-    if (!info) return;
+    if (!info) {
+      setSelected(null); // клик мимо разрешимого узла — снять выбор
+      return;
+    }
     // Drill только в реальные папки. Агрегированное «Прочее» и файлы — не районы.
     // Цель — drillTarget: для вложенного превью это родительский район.
     const t = info.drillTarget;
     if (t.isDir && !t.flags.includes("aggregated")) {
+      setSelected(null); // уходим на новый уровень — старый выбор не актуален
       cb.onDrill(t);
+      return;
     }
+    // Не район — это файл/лист. Синтетическое «Прочее» не выбираем (нет пути).
+    if (info.node.flags.includes("aggregated")) {
+      setSelected(null);
+      return;
+    }
+    setSelected(hit, info.node);
+  }
+
+  /** Запомнить выбранный инстанс и отдать узел наружу (или снять выбор). */
+  function setSelected(hit: Hit | null, node?: ScanNode): void {
+    selected = hit;
+    cb.onSelect(hit ? (node ?? null) : null);
   }
 
   const canvas = handle.canvas;
@@ -192,10 +220,19 @@ export function setupInteraction(
       m.decompose(pos, quat, scale);
       return new Vector3(pos.x, pos.y + scale.y / 2, pos.z);
     },
+    selectionAnchor() {
+      if (!selected) return null;
+      selected.mesh.getMatrixAt(selected.id, m);
+      m.decompose(pos, quat, scale);
+      return new Vector3(pos.x, pos.y + scale.y / 2, pos.z);
+    },
     clearHover() {
       hovered = null;
       highlight.visible = false;
       cb.onHover(null);
+    },
+    clearSelection() {
+      setSelected(null);
     },
     dispose() {
       offFrame();

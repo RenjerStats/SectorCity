@@ -48,6 +48,15 @@ export const scanProgress = atom<ScanProgress | null>(null);
  */
 export const hoveredNode = atom<ScanNode | null>(null);
 
+/**
+ * Выбранный узел (контент карточки-окна над зданием). Меняется по клику —
+ * низкочастотно, поэтому в сторе (docs §1, §5.3). ПОЗИЦИЯ карточки обновляется
+ * императивно покадрово в обход стора (ручная проекция, docs §4); здесь — только
+ * «что показать». `null` = карточка скрыта (режим не `selected`).
+ * 3D-слой пишет (клик по файлу), DOM-слой читает: единственная точка контакта.
+ */
+export const selectedNode = atom<ScanNode | null>(null);
+
 /** Один шаг навигации (хлебная крошка): путь уровня и его имя. */
 export interface Crumb {
   path: string;

@@ -347,7 +347,9 @@ export function buildLevel(
       // Вложенные превью стартуют скрытыми (район далёкий → силуэт); файлы видны.
       const hidden = b.districtIdx !== null;
       buildingMesh!.setMatrixAt(i, hidden ? ZERO_MATRIX : dummy.matrix);
-      const nodeColor = b.node.isDir ? DISTRICT_PLOT_COLOR : CATEGORY_COLOR[b.node.category];
+      const nodeColor = b.node.isDir
+        ? DISTRICT_PLOT_COLOR
+        : CATEGORY_COLOR[b.node.category];
       buildingMesh!.setColorAt(i, color.set(nodeColor));
 
       if (b.districtIdx !== null) lod[b.districtIdx].buildingIds.push(i);
@@ -586,7 +588,10 @@ export function buildLevel(
     if (buildingMesh) {
       // Восстанавливаем файлы верхнего уровня и скрываем вложенные здания.
       buildings.forEach((b, i) => {
-        buildingMesh!.setMatrixAt(i, b.districtIdx === null ? buildingReal[i] : ZERO_MATRIX);
+        buildingMesh!.setMatrixAt(
+          i,
+          b.districtIdx === null ? buildingReal[i] : ZERO_MATRIX,
+        );
       });
       buildingMesh.instanceMatrix.needsUpdate = true;
     }
