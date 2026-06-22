@@ -37,6 +37,7 @@ pub fn run() {
             ipc::commands::get_level,
             ipc::commands::get_node_detail,
             ipc::commands::search,
+            ipc::commands::delete_to_trash,
         ])
         .setup(|app| {
             // Переоткрытие без рескана: если снимок есть — поднимаем его в стейт.

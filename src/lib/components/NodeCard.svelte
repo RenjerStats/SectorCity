@@ -204,7 +204,25 @@
           {/if}
         </div>
 
-        {#if node.flags.includes("cleanupCandidate")}
+        {#if node.flags.includes("locked")}
+          <div class="locked-warning">
+            <svg
+              class="warning-icon"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M12 1.5a5.25 5.25 0 0 0-5.25 5.25v3a3 3 0 0 0-3 3v6.75a3 3 0 0 0 3 3h10.5a3 3 0 0 0 3-3v-6.75a3 3 0 0 0-3-3v-3c0-2.9-2.35-5.25-5.25-5.25Zm-3.75 8.25v-3a3.75 3.75 0 1 1 7.5 0v3H8.25Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+            <span>Системный файл — удаление заблокировано</span>
+          </div>
+        {/if}
+
+        {#if node.flags.includes("cleanupCandidate") && !node.flags.includes("locked")}
           <div class="cleanup-warning">
             <svg
               class="warning-icon"
@@ -437,6 +455,21 @@
   .highlight {
     color: var(--text-2);
     font-weight: 500;
+  }
+
+  /* Заблокировано бэкендом (системные локи) — красный акцент. */
+  .locked-warning {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    padding: 0.35rem 0.55rem;
+    border-radius: var(--r-sm);
+    font-size: 0.76rem;
+    font-weight: 600;
+    margin-bottom: 0.65rem;
   }
 
   /* Кандидат на очистку — семантический амбер (--stale), не акцент. */

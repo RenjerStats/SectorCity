@@ -38,6 +38,10 @@ export interface InteractionCallbacks {
   /** Клик по зданию-файлу → SELECT (карточка над зданием); `null` = снять выбор
    *  (клик мимо зданий). Район и «Прочее» уходят в `onDrill`, не сюда. */
   onSelect(node: ScanNode | null): void;
+  /** Активен ли режим сканера мусора (меняет семантику клика по файлу на пометку). */
+  isCleanup(): boolean;
+  /** Режим cleanup: клик по зданию-файлу — пометить/снять на снос (vision §I.7). */
+  onMark(node: ScanNode): void;
 }
 
 /** Управление слоем взаимодействия. */
@@ -194,6 +198,12 @@ export function setupInteraction(
     if (t.isDir || t.flags.includes("aggregated")) {
       setSelected(null); // уходим на новый уровень — старый выбор не актуален
       cb.onDrill(t);
+      return;
+    }
+    // Режим сканера мусора: клик по зданию-файлу — пометить/снять на снос, а не
+    // открывать карточку (районы/«Прочее» выше всё ещё drill — нужно ходить по дереву).
+    if (cb.isCleanup()) {
+      cb.onMark(info.node);
       return;
     }
     setSelected(hit, info.node);

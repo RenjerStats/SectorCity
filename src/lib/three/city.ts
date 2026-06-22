@@ -30,7 +30,6 @@ import {
   type Camera,
   CircleGeometry,
   Color,
-  ConeGeometry,
   Float32BufferAttribute,
   Group,
   InstancedMesh,
@@ -48,7 +47,7 @@ import type { ScanNode } from "../ipc/contract";
 import {
   AGGREGATE_COLOR,
   CATEGORY_COLOR,
-  CLEANUP_MARKER_COLOR,
+  CLEANUP_MARK_COLOR,
   DISTRICT_PLOT_COLOR,
   GROUND_COLOR,
 } from "./palette";
@@ -99,11 +98,6 @@ export const DIM_FACTOR = 0.12;
 /** Дистанции LOD камера→центр района (гистерезис против мерцания на границе). */
 const NEAR_ENTER = 130; // ближе этого — район раскрывается во вложенные здания
 const NEAR_EXIT = 170; // дальше этого — сворачивается обратно в силуэт
-
-/** Маркер «кандидат на очистку»: перевёрнутая пирамидка над крышей здания. */
-const MARKER_GAP = 3; // зазор между крышей и кончиком маркера
-const MARKER_HEIGHT = 5;
-const MARKER_RADIUS = 2.4;
 
 /** Прямоугольник-владелец уровня (мировые единицы), задаёт аспект раскладки. */
 export interface LevelSpan {
@@ -184,6 +178,19 @@ export interface Level {
    * только притеняется (палитра категорий сохраняется).
    */
   setHighlight(match: ((node: ScanNode) => boolean) | null): void;
+  /**
+   * Облик режима «Сканер мусора» (vision §I.7). При `view ≠ null` сцена уходит в
+   * «вид очистки»: не-кандидаты приглушаются (×`DIM_FACTOR`), кандидаты
+   * (флаг `cleanupCandidate`) — в полном цвете, помеченные на снос (`isMarked`) —
+   * перекрашены в красный акцент `CLEANUP_MARK_COLOR`. `null` — выйти из вида
+   * (владелец затем восстанавливает подсветку-фильтр через `setHighlight`).
+   */
+  setCleanup(
+    view: {
+      isMarked: (node: ScanNode) => boolean;
+      isCandidate: (node: ScanNode) => boolean;
+    } | null,
+  ): void;
   /** Освободить GPU-ресурсы (geometry/material всех мешей). */
   dispose(): void;
 }
@@ -395,9 +402,6 @@ export function buildLevel(
     l.plotId = j;
   });
 
-  // Маркеры «кандидат на очистку» — только над узлами верхнего уровня (depth 1).
-  const markerTops: { x: number; z: number; y: number }[] = [];
-
   if (buildings.length > 0) {
     buildingMesh = new InstancedMesh(
       new BoxGeometry(1, 1, 1),
@@ -421,11 +425,6 @@ export function buildLevel(
       const drillTarget =
         b.districtIdx !== null ? districts[b.districtIdx].node : b.node;
       buildingPick[i] = { node: b.node, drillTarget };
-
-      // Маркер очистки — только для здания верхнего уровня (файл-кандидат).
-      if (b.districtIdx === null && b.node.flags.includes("cleanupCandidate")) {
-        markerTops.push({ x: box.centerX, z: box.centerZ, y: box.height });
-      }
     });
     buildingMesh.instanceMatrix.needsUpdate = true;
     if (buildingMesh.instanceColor)
@@ -486,14 +485,6 @@ export function buildLevel(
         w: plot.width,
         d: plot.depth,
       });
-
-      if (d.node.flags.includes("cleanupCandidate")) {
-        markerTops.push({
-          x: coarse.centerX,
-          z: coarse.centerZ,
-          y: coarse.height,
-        });
-      }
     });
     plotMesh.instanceMatrix.needsUpdate = true;
     coarseMesh.instanceMatrix.needsUpdate = true;
@@ -501,12 +492,6 @@ export function buildLevel(
     if (coarseMesh.instanceColor) coarseMesh.instanceColor.needsUpdate = true;
     group.add(plotMesh);
     group.add(coarseMesh);
-  }
-
-  // Аннотация формой: над каждым узлом-кандидатом верхнего уровня — пирамидка.
-  let markerMesh: InstancedMesh | null = null;
-  if (markerTops.length > 0) {
-    markerMesh = buildCleanupMarkers(group, markerTops);
   }
 
   // Облик: декор показывает только силуэты, притушенные; активный — всё.
@@ -608,8 +593,6 @@ export function buildLevel(
       mat.depthWrite = true;
     }
 
-    if (markerMesh) markerMesh.visible = false;
-
     if (coarseMesh) {
       // В режиме декорации все папки раскрыты, поэтому скрываем все их силуэты-блоки
       for (let j = 0; j < coarseReal.length; j++)
@@ -643,7 +626,6 @@ export function buildLevel(
       mat.opacity = 1;
       mat.depthWrite = true;
     }
-    if (markerMesh) markerMesh.visible = true;
     if (coarseMesh) {
       const mat = coarseMesh.material as MeshLambertMaterial;
       mat.color.setRGB(1, 1, 1); // цвет района — per-instance
@@ -722,38 +704,44 @@ export function buildLevel(
           coarseMesh.instanceColor.needsUpdate = true;
       }
     },
+    setCleanup(view) {
+      // Цвет узла в виде очистки: помечен → красный акцент; кандидат → полный
+      // цвет; иначе → приглушён (×DIM). `null` — базовые цвета (выход из вида;
+      // владелец затем восстановит подсветку-фильтр через setHighlight).
+      const colorFor = (node: ScanNode, base: number): number => {
+        if (!view) return base;
+        if (view.isMarked(node)) return CLEANUP_MARK_COLOR;
+        return view.isCandidate(node) ? base : -1; // -1 = dim
+      };
+      if (buildingMesh) {
+        buildings.forEach((b, i) => {
+          const base = baseBuildingColor(b.node);
+          const c = colorFor(b.node, base);
+          color.set(c === -1 ? base : c);
+          if (c === -1) color.multiplyScalar(DIM_FACTOR);
+          buildingMesh!.setColorAt(i, color);
+        });
+        if (buildingMesh.instanceColor)
+          buildingMesh.instanceColor.needsUpdate = true;
+      }
+      if (plotMesh && coarseMesh) {
+        districts.forEach((d, j) => {
+          const base = districtBaseColor(d.node);
+          const c = colorFor(d.node, base);
+          color.set(c === -1 ? base : c);
+          if (c === -1) color.multiplyScalar(DIM_FACTOR);
+          plotMesh!.setColorAt(j, color);
+          coarseMesh!.setColorAt(j, color);
+        });
+        if (plotMesh.instanceColor) plotMesh.instanceColor.needsUpdate = true;
+        if (coarseMesh.instanceColor)
+          coarseMesh.instanceColor.needsUpdate = true;
+      }
+    },
     dispose() {
       disposeGroup(group);
     },
   };
-}
-
-/** Маркеры-флажки кандидатов на очистку: один `InstancedMesh` пирамидок. */
-function buildCleanupMarkers(
-  group: Group,
-  tops: { x: number; z: number; y: number }[],
-): InstancedMesh {
-  // ConeGeometry с 4 гранями = пирамидка; апекс по умолчанию вверху.
-  const geometry = new ConeGeometry(MARKER_RADIUS, MARKER_HEIGHT, 4);
-  const material = new MeshBasicMaterial({
-    color: new Color(CLEANUP_MARKER_COLOR),
-  });
-  const markers = new InstancedMesh(geometry, material, tops.length);
-  const dummy = new Object3D();
-  tops.forEach((t, i) => {
-    // Поворот на π вокруг X → апекс смотрит ВНИЗ (на крышу); π/4 вокруг Y —
-    // ромбовидный силуэт. Центр ставим так, чтобы кончик висел в MARKER_GAP
-    // над крышей: tip = center.y − H/2.
-    dummy.position.set(t.x, t.y + MARKER_GAP + MARKER_HEIGHT / 2, t.z);
-    dummy.rotation.set(Math.PI, Math.PI / 4, 0);
-    dummy.updateMatrix();
-    markers.setMatrixAt(i, dummy.matrix);
-  });
-  markers.instanceMatrix.needsUpdate = true;
-  // Метка, чтобы пикинг/hover отличали маркеры от городских мешей.
-  markers.userData.isCleanupMarker = true;
-  group.add(markers);
-  return markers;
 }
 
 /** clamp+smoothstep на [0,1] — мягкая интерполяция для радиального угасания. */

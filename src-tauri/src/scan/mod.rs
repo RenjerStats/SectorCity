@@ -57,10 +57,17 @@ pub struct TreeNode {
     pub child_count: u32,
     /// Категория содержимого (канал цвета). Для файлов — по расширению.
     pub category: Category,
+    /// Маска категорий ФАЙЛОВ в поддереве (объединение снизу вверх): файл — свой
+    /// бит, папка — объединение детей. Производная; считается после связки дерева
+    /// (`compute_category_masks`) и не хранится в снимке (восстанавливается при
+    /// загрузке). Питает структурный фильтр по категориям (см. `category_bit`).
+    pub cat_mask: u8,
     /// Узел — reparse point / junction: внутрь не спускались.
     pub is_reparse: bool,
     /// Папка — известный кэш/мусор (кандидат на очистку).
     pub is_cleanup: bool,
+    /// Узел заблокирован для удаления (системный).
+    pub is_locked: bool,
     /// Индексы прямых детей в арене (только для папок).
     pub children: Vec<usize>,
     /// Глубина от корня скана (корень = 0). Нужна для порядка агрегации.
@@ -88,6 +95,46 @@ impl ScanTree {
     /// Индекс узла по очищенному пути.
     pub fn index_of(&self, path: &str) -> Option<usize> {
         self.by_path.get(path).copied()
+    }
+
+    /// Удалить узел по пути, убрать его и потомков из индекса, и скорректировать размеры родителей.
+    pub fn delete_node(&mut self, path: &str) -> Option<u64> {
+        let idx = self.by_path.get(path).copied()?;
+        let node_size = self.nodes[idx].size;
+
+        // 1. Убираем сам узел и всех потомков из индекса путей
+        self.remove_descendants_from_index(idx);
+
+        // 2. Найдём родителя и уберём узел из его списка детей
+        let parent_path = std::path::Path::new(path).parent()?;
+        let parent_path_str = parent_path.to_string_lossy();
+
+        if let Some(&parent_idx) = self.by_path.get(parent_path_str.as_ref()) {
+            self.nodes[parent_idx].children.retain(|&c| c != idx);
+
+            // 3. Скорректируем размеры родителей вверх до корня
+            let mut curr = Some(parent_idx);
+            while let Some(curr_idx) = curr {
+                let node = &mut self.nodes[curr_idx];
+                node.size = node.size.saturating_sub(node_size);
+
+                let p_path = node.path.parent();
+                curr = p_path.and_then(|p| self.by_path.get(p.to_string_lossy().as_ref()).copied());
+            }
+        }
+
+        Some(node_size)
+    }
+
+    fn remove_descendants_from_index(&mut self, idx: usize) {
+        let path_str = self.nodes[idx].path.to_string_lossy().into_owned();
+        self.by_path.remove(&path_str);
+
+        // Клонируем список детей для обхода
+        let kids = self.nodes[idx].children.clone();
+        for child_idx in kids {
+            self.remove_descendants_from_index(child_idx);
+        }
     }
 
     /// Уровень `path` с агрегацией мелочи и превью на `depth` уровней вниз.
@@ -250,10 +297,14 @@ impl ScanTree {
     ) -> ScanNode {
         let mut sum = 0u64;
         let mut oldest = i64::MAX;
+        // Маска блока «Мелочь» — объединение масок свёрнутого хвоста: так фильтр по
+        // категориям знает, есть ли внутри блока хоть одна выбранная категория.
+        let mut cat_mask = 0u8;
         for &k in tail {
             let n = &self.nodes[k];
             sum += n.size;
             oldest = oldest.min(n.mtime);
+            cat_mask |= n.cat_mask;
         }
         let other_path = format!("{level_path}{OTHER_SUFFIX}");
         // Превью хвоста (на уровень ниже): тот же `split_head_tail` по тому же
@@ -266,13 +317,14 @@ impl ScanTree {
         };
         ScanNode {
             path: other_path,
-            name: "Прочее".to_string(),
+            name: "Мелочь".to_string(),
             is_dir: false,
             size: sum,
             mtime: if oldest == i64::MAX { 0 } else { oldest },
             atime: if oldest == i64::MAX { 0 } else { oldest },
             child_count: tail.len() as u32,
             category: Category::Other,
+            category_mask: cat_mask,
             flags: vec![NodeFlag::Aggregated],
             children,
         }
@@ -289,6 +341,9 @@ impl ScanTree {
         if n.is_cleanup {
             flags.push(NodeFlag::CleanupCandidate);
         }
+        if n.is_locked {
+            flags.push(NodeFlag::Locked);
+        }
         ScanNode {
             path: n.path.to_string_lossy().into_owned(),
             name: n.name.clone(),
@@ -298,9 +353,52 @@ impl ScanTree {
             atime: n.atime,
             child_count: n.child_count,
             category: n.category,
+            category_mask: n.cat_mask,
             flags,
             // Превью заполняет `node_with_preview` при depth > 1; здесь — пусто.
             children: Vec::new(),
+        }
+    }
+}
+
+/// Бит категории в маске `TreeNode::cat_mask` / `ScanNode::category_mask`.
+///
+/// ВАЖНО: порядок битов — зеркало `ALL_CATEGORIES` на фронте
+/// (`src/lib/store/mode.ts`): `code`=0, `document`=1, …, `other`=7. Фронт строит
+/// маску выбранных категорий в этом же порядке и пересекает её с `category_mask`.
+/// Менять порядок — синхронно в обоих местах (есть тест `category_bits_are_stable`).
+pub(crate) fn category_bit(c: Category) -> u8 {
+    match c {
+        Category::Code => 1 << 0,
+        Category::Document => 1 << 1,
+        Category::Image => 1 << 2,
+        Category::Video => 1 << 3,
+        Category::Audio => 1 << 4,
+        Category::Archive => 1 << 5,
+        Category::Binary => 1 << 6,
+        Category::Other => 1 << 7,
+    }
+}
+
+/// Посчитать `cat_mask` для всей арены снизу вверх: файл → собственный бит
+/// категории, папка → объединение масок детей. `parents[i]` — индекс родителя `i`
+/// (или `None` у корня). Обход по убыванию глубины гарантирует, что ребёнок учтён
+/// раньше родителя. Общая точка для свежего скана и загрузки снимка (производное
+/// поле в БД не храним).
+fn compute_category_masks(nodes: &mut [TreeNode], parents: &[Option<usize>]) {
+    for n in nodes.iter_mut() {
+        n.cat_mask = if n.is_dir {
+            0
+        } else {
+            category_bit(n.category)
+        };
+    }
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(nodes[i].depth));
+    for i in order {
+        let mask = nodes[i].cat_mask;
+        if let Some(pi) = parents[i] {
+            nodes[pi].cat_mask |= mask;
         }
     }
 }
@@ -480,6 +578,8 @@ pub fn scan_with(
         } else {
             crate::classify::is_stale_large_file(size, mtime, now)
         };
+        let is_locked = crate::classify::is_locked_path(&clean_path, &name)
+            || crate::classify::is_system_by_attrs(&meta);
 
         let depth = entry.depth();
         index.insert(raw_path.clone(), nodes.len());
@@ -492,8 +592,10 @@ pub fn scan_with(
             atime,
             child_count: 0,
             category,
+            cat_mask: 0, // считается снизу вверх после связки дерева (пасс 3)
             is_reparse,
             is_cleanup,
+            is_locked,
             children: Vec::new(),
             depth,
         });
@@ -518,9 +620,12 @@ pub fn scan_with(
         let mtime = root_meta.modified().map(to_unix).unwrap_or(0);
         let clean_root = strip_long_path_prefix(root);
         let category = crate::classify::classify(&clean_root, root_meta.is_dir());
+        let name = root.to_string_lossy().into_owned();
+        let is_locked = crate::classify::is_locked_path(&clean_root, &name)
+            || crate::classify::is_system_by_attrs(&root_meta);
         nodes.push(TreeNode {
             path: clean_root,
-            name: root.to_string_lossy().into_owned(),
+            name,
             is_dir: root_meta.is_dir(),
             size: if root_meta.is_dir() {
                 0
@@ -531,8 +636,15 @@ pub fn scan_with(
             atime: root_meta.accessed().map(to_unix).unwrap_or(mtime),
             child_count: 0,
             category,
+            // Одиночный корень: эта ветка минует пасс 3 — маску ставим сразу.
+            cat_mask: if root_meta.is_dir() {
+                0
+            } else {
+                category_bit(category)
+            },
             is_reparse: is_reparse_point(&root_meta),
             is_cleanup: false,
+            is_locked,
             children: Vec::new(),
             depth: 0,
         });
@@ -581,6 +693,9 @@ pub fn scan_with(
             nodes[pi].size += size;
         }
     }
+
+    // Маска категорий — тем же обходом снизу вверх (после связки родителей).
+    compute_category_masks(&mut nodes, &parents);
 
     // Корень — узел с глубиной 0 (он же первый вход jwalk).
     let root_idx = parents.iter().position(|p| p.is_none()).unwrap_or(0);
@@ -954,6 +1069,84 @@ mod tests {
         assert!(
             sub_node.children.iter().any(|c| c.name == "inner.bin"),
             "абсолютный порог не должен сворачивать содержимое дочерней папки"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn category_bits_are_stable() {
+        // Порядок битов — контракт с фронтом (`ALL_CATEGORIES`). Менять синхронно.
+        assert_eq!(category_bit(Category::Code), 1 << 0);
+        assert_eq!(category_bit(Category::Document), 1 << 1);
+        assert_eq!(category_bit(Category::Image), 1 << 2);
+        assert_eq!(category_bit(Category::Video), 1 << 3);
+        assert_eq!(category_bit(Category::Audio), 1 << 4);
+        assert_eq!(category_bit(Category::Archive), 1 << 5);
+        assert_eq!(category_bit(Category::Binary), 1 << 6);
+        assert_eq!(category_bit(Category::Other), 1 << 7);
+    }
+
+    #[test]
+    fn folder_mask_unions_descendant_file_categories() {
+        let root = temp_dir("mask");
+        write_file(&root.join("a.mp4"), 10);
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        write_file(&sub.join("b.txt"), 10);
+
+        let tree = scan_root(&root).unwrap();
+        let a = tree.nodes.iter().find(|n| n.name == "a.mp4").unwrap();
+        let b = tree.nodes.iter().find(|n| n.name == "b.txt").unwrap();
+        let sub_node = tree.nodes.iter().find(|n| n.name == "sub").unwrap();
+
+        // Файл — ровно один бит своей категории; папка — объединение детей.
+        assert_eq!(a.cat_mask, category_bit(a.category));
+        assert_eq!(
+            sub_node.cat_mask, b.cat_mask,
+            "папка = маска единственного файла"
+        );
+        assert_eq!(
+            tree.root_node().cat_mask,
+            a.cat_mask | b.cat_mask,
+            "корень = объединение всех файлов поддерева"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn aggregate_mask_unions_tail_categories() {
+        let root = temp_dir("aggmask");
+        // big остаётся зданием, два мелких файла сворачиваются в «Мелочь».
+        write_file(&root.join("big.mp4"), 900);
+        write_file(&root.join("a.txt"), 20);
+        write_file(&root.join("b.jpg"), 18);
+
+        let tree = scan_root(&root).unwrap();
+        let root_path = tree.root_node().path.to_string_lossy().into_owned();
+        let spec = AggSpec {
+            mode: AggMode::Relative,
+            fraction: 0.05,
+            min_bytes: 0,
+            top_n_cap: 0,
+        };
+        let level = tree.level(&root_path, &spec, 1);
+        let other = level
+            .iter()
+            .find(|n| n.flags.contains(&NodeFlag::Aggregated))
+            .expect("блок «Мелочь»");
+
+        let a = tree.nodes.iter().find(|n| n.name == "a.txt").unwrap();
+        let b = tree.nodes.iter().find(|n| n.name == "b.jpg").unwrap();
+        assert_eq!(
+            other.category_mask,
+            a.cat_mask | b.cat_mask,
+            "маска «Мелочи» = объединение свёрнутого хвоста"
+        );
+        assert_eq!(
+            other.name, "Мелочь",
+            "блок-агрегат переименован (не «Прочее»)"
         );
 
         fs::remove_dir_all(&root).ok();

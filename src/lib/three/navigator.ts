@@ -73,6 +73,18 @@ export interface CityNavigator {
    * что фильтр «переживает» навигацию. `null` — снять подсветку.
    */
   applyHighlight(match: ((node: ScanNode) => boolean) | null): void;
+  /**
+   * Облик режима «Сканер мусора» (vision §I.7). `view ≠ null` — включить «вид
+   * очистки» на активном уровне (кандидаты ярко, прочее в тень, помеченные —
+   * красным); `null` — выключить и вернуть подсветку-фильтр. Как и подсветка,
+   * переживает навигацию: переприменяется при каждой смене активного уровня.
+   */
+  setCleanup(
+    view: {
+      isMarked: (node: ScanNode) => boolean;
+      isCandidate: (node: ScanNode) => boolean;
+    } | null,
+  ): void;
   /** Освободить все уровни. */
   dispose(): void;
 }
@@ -83,6 +95,18 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
   let decor: Level | null = null;
   // Текущий предикат подсветки-фильтра; переприменяется при смене активного.
   let currentMatch: ((node: ScanNode) => boolean) | null = null;
+  // Облик сканера мусора (если включён); тоже переживает навигацию.
+  let cleanupView: {
+    isMarked: (node: ScanNode) => boolean;
+    isCandidate: (node: ScanNode) => boolean;
+  } | null = null;
+
+  /** Применить облик к уровню: подсветка-фильтр, поверх неё — вид очистки (если он
+   *  включён). Зовётся при каждой смене активного уровня (reset/rebuild/drill/up). */
+  function applyAppearance(level: Level): void {
+    level.setHighlight(currentMatch);
+    if (cleanupView) level.setCleanup(cleanupView);
+  }
 
   function setActiveView(level: Level | null): void {
     content.userData.activeView = level ? level.view : null;
@@ -103,7 +127,7 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     // Корень/прыжок: квадратный канонический холст.
     active = buildLevel(nodes, { w: CITY_SPAN, d: CITY_SPAN }, path);
     content.add(active.group);
-    active.setHighlight(currentMatch); // фильтр переживает пересборку уровня
+    applyAppearance(active); // фильтр + вид очистки переживают пересборку уровня
     setActiveView(active);
     setInteractive(true);
     handle.placeCamera(INITIAL_CAMERA_POS, INITIAL_TARGET);
@@ -118,7 +142,7 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     disposeLevel(active);
     active = buildLevel(nodes, span, path);
     content.add(active.group);
-    active.setHighlight(currentMatch); // подсветка переживает пересборку
+    applyAppearance(active); // подсветка + вид очистки переживают пересборку
     setActiveView(active);
   }
 
@@ -146,7 +170,7 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
       // origin shift в кадре завершения (см. шапку): следующий render нормирован.
       const next = buildLevel(childNodes, spanFromPlacement(g), node.path);
       content.add(next.group); // канонически, identity
-      next.setHighlight(currentMatch); // фильтр переживает drill
+      applyAppearance(next); // фильтр + вид очистки переживают drill
 
       // Старый активный → декор в `G⁻¹` (раздут, выглядывает по краям). Силуэт
       // самого района `node` скрываем — иначе он накрыл бы новый активный уровень.
@@ -196,7 +220,7 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
       parent.group.position.set(0, 0, 0);
       parent.group.scale.setScalar(1);
       parent.setActive();
-      parent.setHighlight(currentMatch); // фильтр переживает подъём
+      applyAppearance(parent); // фильтр + вид очистки переживают подъём
 
       active = parent;
       // Деда как контекст-декор не достраиваем: его аспект зависит от пра-деда
@@ -215,7 +239,22 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
 
   function applyHighlight(match: ((node: ScanNode) => boolean) | null): void {
     currentMatch = match;
-    active?.setHighlight(match);
+    if (active) applyAppearance(active); // фильтр под видом очистки (если он включён)
+  }
+
+  function setCleanup(
+    view: {
+      isMarked: (node: ScanNode) => boolean;
+      isCandidate: (node: ScanNode) => boolean;
+    } | null,
+  ): void {
+    cleanupView = view;
+    if (!active) return;
+    if (view) active.setCleanup(view);
+    else {
+      active.setCleanup(null); // снять красный/дим
+      active.setHighlight(currentMatch); // вернуть подсветку-фильтр
+    }
   }
 
   function dispose(): void {
@@ -235,6 +274,7 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     up,
     updateLOD,
     applyHighlight,
+    setCleanup,
     dispose,
   };
 }

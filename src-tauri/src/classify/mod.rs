@@ -57,6 +57,50 @@ pub fn is_stale_large_file(size: u64, mtime: i64, now: i64) -> bool {
     size >= STALE_LARGE_MIN_SIZE && now.saturating_sub(mtime) >= STALE_AGE_SECONDS
 }
 
+/// Проверить, заблокирован ли узел (системный файл или папка).
+/// Windows-специфичные системные пути, скрытые/системные атрибуты, или критические файлы.
+pub fn is_locked_path(path: &Path, name: &str) -> bool {
+    let lower_name = name.to_ascii_lowercase();
+
+    // 1. Критические файлы Windows на диске
+    if lower_name == "pagefile.sys" || lower_name == "hiberfil.sys" || lower_name == "swapfile.sys"
+    {
+        return true;
+    }
+
+    // 2. Системные директории Windows в путях
+    for component in path.components() {
+        if let Some(s) = component.as_os_str().to_str() {
+            let lower_s = s.to_ascii_lowercase();
+            if lower_s == "windows"
+                || lower_s == "program files"
+                || lower_s == "program files (x86)"
+                || lower_s == "programdata"
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Проверить атрибуты метаданных (на Windows — System атрибут).
+pub fn is_system_by_attrs(meta: &std::fs::Metadata) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let attrs = meta.file_attributes();
+        // FILE_ATTRIBUTE_SYSTEM = 0x4
+        (attrs & 0x4) != 0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +155,25 @@ mod tests {
         assert!(is_cleanup_dir("$RECYCLE.BIN"));
         assert!(is_cleanup_dir(".Trash"));
         assert!(!is_cleanup_dir("Recycle"));
+    }
+
+    #[test]
+    fn detects_locked_paths() {
+        assert!(is_locked_path(
+            Path::new("C:\\Windows\\System32\\cmd.exe"),
+            "cmd.exe"
+        ));
+        assert!(is_locked_path(
+            Path::new("D:\\Program Files\\Rust\\bin"),
+            "bin"
+        ));
+        assert!(is_locked_path(
+            Path::new("C:\\pagefile.sys"),
+            "pagefile.sys"
+        ));
+        assert!(!is_locked_path(
+            Path::new("C:\\projects\\my_project"),
+            "my_project"
+        ));
     }
 }

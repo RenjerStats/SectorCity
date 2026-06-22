@@ -8,18 +8,30 @@
    * стор. «Сканер мусора» / «Показать скрытое» / выбор темы добавляются сюда
    * позже (структура регионов готова).
    */
-  import { appMode } from "../store/mode";
-  import { dispatchCommand, filtersOpen, toggleFilters } from "../store/ui";
+  import { appMode, markedCount, markedBytes } from "../store/mode";
+  import {
+    dispatchCommand,
+    filtersOpen,
+    toggleFilters,
+    setCleanupConfirm,
+  } from "../store/ui";
+  import { formatSize } from "../format";
   import SearchBox from "./SearchBox.svelte";
 
   let busy = $derived($appMode.kind === "scanning");
+  let cleanup = $derived($appMode.kind === "cleanup");
   let filters = $derived($filtersOpen);
+  let marked = $derived($markedCount);
+  let markedSize = $derived($markedBytes);
 </script>
 
 <header class="header">
   <div class="region brand">
     <span class="brand-dot" aria-hidden="true"></span>
     <span class="brand-name">SECTORCITY</span>
+    {#if cleanup}
+      <span class="chip-cleanup">СКАНЕР МУСОРА</span>
+    {/if}
   </div>
 
   <div class="region center">
@@ -31,6 +43,21 @@
       <button class="btn" onclick={() => dispatchCommand({ kind: "cancel" })}>
         Отменить
       </button>
+    {:else if cleanup}
+      <!-- В режиме очистки шапка фокусируется на сносе/выходе (vision §I.11). -->
+      <button
+        class="btn btn-primary"
+        disabled={marked === 0}
+        onclick={() => setCleanupConfirm(true)}
+      >
+        Снести{marked > 0 ? ` (${marked} · ${formatSize(markedSize)})` : ""}
+      </button>
+      <button
+        class="btn"
+        onclick={() => dispatchCommand({ kind: "exitCleanup" })}
+      >
+        Выйти
+      </button>
     {:else}
       <button
         class="btn btn-primary"
@@ -38,18 +65,24 @@
       >
         Сканировать
       </button>
+      <button
+        class="btn"
+        onclick={() => dispatchCommand({ kind: "enterCleanup" })}
+      >
+        Сканер мусора
+      </button>
+      <button
+        class="btn"
+        class:on={filters}
+        aria-pressed={filters}
+        onclick={toggleFilters}
+      >
+        Фильтры
+      </button>
+      <button class="btn" onclick={() => dispatchCommand({ kind: "reset" })}>
+        Сбросить вид
+      </button>
     {/if}
-    <button
-      class="btn"
-      class:on={filters}
-      aria-pressed={filters}
-      onclick={toggleFilters}
-    >
-      Фильтры
-    </button>
-    <button class="btn" onclick={() => dispatchCommand({ kind: "reset" })}>
-      Сбросить вид
-    </button>
   </div>
 </header>
 
@@ -118,6 +151,27 @@
   }
   .btn:active {
     transform: translateY(0.5px);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .btn:disabled:hover {
+    background: var(--accent);
+    border-color: transparent;
+  }
+
+  /* Чип активного режима очистки — единственный красный акцент (vision §I.11). */
+  .chip-cleanup {
+    font-family: var(--font-label, var(--font-display));
+    font-size: 0.62rem;
+    letter-spacing: var(--track-caps);
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: var(--r-pill);
+    padding: 0.15rem 0.55rem;
+    white-space: nowrap;
   }
   /* Активный тумблер (Фильтры открыты) — подсветка единственным акцентом. */
   .btn.on {

@@ -6,6 +6,7 @@
  */
 import { Matrix4, Vector3, type InstancedMesh } from "three";
 import type { Category, ScanNode } from "../ipc/contract";
+import { categoryBit } from "../store/mode";
 
 /** Фиксированный «сейчас» эпохи для детерминированных высот в тестах. */
 export const FIXED_NOW = 1_700_000_000;
@@ -26,6 +27,7 @@ export function file(
     atime: FIXED_NOW - 1000,
     childCount: 0,
     category,
+    categoryMask: categoryBit(category),
     flags: [],
   };
 }
@@ -43,6 +45,8 @@ export function dir(path: string, children: ScanNode[]): ScanNode {
     atime: FIXED_NOW - 1000,
     childCount: children.length,
     category: "other",
+    // Маска папки = объединение масок детей (как считает бэк снизу вверх).
+    categoryMask: children.reduce((m, c) => m | c.categoryMask, 0),
     flags: [],
     children,
   };

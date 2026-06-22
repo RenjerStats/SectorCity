@@ -64,11 +64,20 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             category    TEXT    NOT NULL,
             is_reparse  INTEGER NOT NULL,
             is_cleanup  INTEGER NOT NULL,
+            is_locked   INTEGER NOT NULL DEFAULT 0,
             depth       INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_nodes_path ON nodes(path);
         CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent);",
-    )
+    )?;
+
+    // Попытаться добавить колонку, если таблица была создана старой версией
+    let _ = conn.execute(
+        "ALTER TABLE nodes ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+
+    Ok(())
 }
 
 /// Массив «индекс узла → индекс родителя» по спискам детей.
@@ -101,8 +110,8 @@ pub fn save(tree: &ScanTree, db_path: &Path) -> rusqlite::Result<()> {
         let mut stmt = tx.prepare(
             "INSERT INTO nodes
                 (idx, parent, path, name, is_dir, size, mtime, atime,
-                 child_count, category, is_reparse, is_cleanup, depth)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                 child_count, category, is_reparse, is_cleanup, is_locked, depth)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         )?;
         for (i, n) in tree.nodes.iter().enumerate() {
             let path = n.path.to_string_lossy().into_owned();
@@ -119,6 +128,7 @@ pub fn save(tree: &ScanTree, db_path: &Path) -> rusqlite::Result<()> {
                 category_to_str(n.category),
                 n.is_reparse as i64,
                 n.is_cleanup as i64,
+                n.is_locked as i64,
                 n.depth as i64,
             ])?;
         }
@@ -157,7 +167,7 @@ pub fn load(db_path: &Path) -> rusqlite::Result<ScanTree> {
     // Загружаем узлы по возрастанию idx, чтобы заполнить арену по месту.
     let mut stmt = conn.prepare(
         "SELECT idx, parent, path, name, is_dir, size, mtime, atime,
-                child_count, category, is_reparse, is_cleanup, depth
+                child_count, category, is_reparse, is_cleanup, is_locked, depth
          FROM nodes ORDER BY idx",
     )?;
 
@@ -179,10 +189,12 @@ pub fn load(db_path: &Path) -> rusqlite::Result<ScanTree> {
                 atime: r.get(7)?,
                 child_count: r.get::<_, i64>(8)? as u32,
                 category: category_from_str(&category),
+                cat_mask: 0, // производное поле — пересчитаем после связки детей
                 is_reparse: r.get::<_, i64>(10)? != 0,
                 is_cleanup: r.get::<_, i64>(11)? != 0,
+                is_locked: r.get::<_, i64>(12)? != 0,
                 children: Vec::new(),
-                depth: r.get::<_, i64>(12)? as usize,
+                depth: r.get::<_, i64>(13)? as usize,
             },
         })
     })?;
@@ -203,6 +215,9 @@ pub fn load(db_path: &Path) -> rusqlite::Result<ScanTree> {
             }
         }
     }
+
+    // Маску категорий в БД не храним (производное) — пересчитываем снизу вверх.
+    super::compute_category_masks(&mut nodes, &parents);
 
     let by_path = build_path_index(&nodes);
     Ok(ScanTree {
@@ -261,6 +276,12 @@ mod tests {
         // Корень: тот же размер (свёртка) и тот же путь.
         assert_eq!(loaded.root_node().size, tree.root_node().size);
         assert_eq!(loaded.root_node().path, tree.root_node().path);
+        // Маска категорий — производная, в БД не хранится: проверяем пересчёт.
+        assert_eq!(
+            loaded.root_node().cat_mask,
+            tree.root_node().cat_mask,
+            "маска категорий восстановлена при загрузке снимка"
+        );
         // Запрос уровня из загруженного дерева совпадает по количеству детей.
         let root_path = tree.root_node().path.to_string_lossy().into_owned();
         // Без агрегации (fraction = 0, без потолка) — сравниваем «сырые» уровни.

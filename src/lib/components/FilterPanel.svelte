@@ -1,14 +1,24 @@
 <script lang="ts">
   /**
-   * Панель фильтра-подсветки кандидатов (фаза 2, DoD). Переехала в footer
-   * (открывается тумблером «Фильтры» в header) — горизонтальная компактная форма.
-   * Пишет в стор `candidateFilter`; рендер сам гасит несовпадающие узлы (Scene
-   * подписан и зовёт `navigator.applyHighlight`). Логика прежняя, изменён облик.
+   * Панель фильтров: содержит переключатели категорий файлов (структурный фильтр)
+   * и настройки порога агрегации (Relative/Absolute блок «Прочее»).
    */
-  import { candidateFilter, filterActive, aggSettings } from "../store/mode";
+  import {
+    aggSettings,
+    categoryFilter,
+    categoryFilterActive,
+    toggleCategory,
+    resetCategories,
+    showAggregate,
+    ALL_CATEGORIES,
+  } from "../store/mode";
+  import {
+    AGGREGATE_COLOR,
+    CATEGORY_COLOR,
+    CATEGORY_LABEL,
+  } from "../three/palette";
   import type { AggMode } from "../ipc/contract";
 
-  const GB = 1024 ** 3;
   const MB = 1024 ** 2;
   const KB = 1024;
 
@@ -18,18 +28,7 @@
     { label: "< 1 МБ", value: MB },
     { label: "< 10 МБ", value: 10 * MB },
   ];
-  const SIZE_PRESETS = [
-    { label: "любой", value: 0 },
-    { label: "≥ 100 МБ", value: 100 * MB },
-    { label: "≥ 1 ГБ", value: GB },
-  ];
-  const AGE_PRESETS = [
-    { label: "любая", value: 0 },
-    { label: "> 6 мес.", value: 180 },
-    { label: "> 1 года", value: 365 },
-  ];
 
-  let f = $derived($candidateFilter);
   let a = $derived($aggSettings);
 
   function setAggMode(mode: AggMode) {
@@ -44,70 +43,59 @@
     aggSettings.set({ ...a, minBytes: v });
   }
 
-  function toggleCandidates() {
-    candidateFilter.set({ ...f, onlyCandidates: !f.onlyCandidates });
-  }
-  function setMinSize(v: number) {
-    candidateFilter.set({ ...f, minSize: v });
-  }
-  function setOlder(v: number) {
-    candidateFilter.set({ ...f, olderThanDays: v });
-  }
-  function reset() {
-    candidateFilter.set({
-      onlyCandidates: false,
-      minSize: 0,
-      olderThanDays: 0,
-    });
+  function hex(value: number): string {
+    return "#" + value.toString(16).padStart(6, "0");
   }
 </script>
 
 <div class="filters">
-  <span class="cap">ФИЛЬТР</span>
+  <span class="cap">КАТЕГОРИИ</span>
 
-  <label class="check">
-    <input
-      type="checkbox"
-      checked={f.onlyCandidates}
-      onchange={toggleCandidates}
-    />
-    <span class="box" aria-hidden="true"></span>
-    <span>Кандидаты на очистку</span>
-  </label>
+  <div class="cats-group">
+    {#each ALL_CATEGORIES as cat (cat)}
+      <button
+        class="cat-chip"
+        class:off={!$categoryFilter.has(cat)}
+        title={CATEGORY_LABEL[cat]}
+        onclick={() => toggleCategory(cat)}
+      >
+        <span
+          class="dot"
+          style="background:{$categoryFilter.has(cat)
+            ? hex(CATEGORY_COLOR[cat])
+            : 'var(--text-muted)'}"
+        ></span>
+        <span class="lbl">{CATEGORY_LABEL[cat]}</span>
+      </button>
+    {/each}
 
-  <label class="field">
-    <span class="lbl">Размер</span>
-    <select
-      value={f.minSize}
-      onchange={(e) => setMinSize(Number(e.currentTarget.value))}
-    >
-      {#each SIZE_PRESETS as p (p.value)}
-        <option value={p.value}>{p.label}</option>
-      {/each}
-    </select>
-  </label>
-
-  <label class="field">
-    <span class="lbl">Давность</span>
-    <select
-      value={f.olderThanDays}
-      onchange={(e) => setOlder(Number(e.currentTarget.value))}
-    >
-      {#each AGE_PRESETS as p (p.value)}
-        <option value={p.value}>{p.label}</option>
-      {/each}
-    </select>
-  </label>
-
-  {#if $filterActive}
-    <button class="reset" onclick={reset}>Сбросить</button>
-  {/if}
+    {#if $categoryFilterActive}
+      <button class="reset-cats" onclick={resetCategories}>Сбросить</button>
+    {/if}
+  </div>
 
   <span class="sep" aria-hidden="true"></span>
   <span class="cap">АГРЕГАТ</span>
 
+  <!-- Показывать ли блок «Мелочь» вообще. Выкл — мелочь не отображается, площадь
+       перетекает к крупным (структурно, как фильтр категорий). -->
+  <button
+    class="cat-chip agg-toggle"
+    class:off={!$showAggregate}
+    title={"Показывать блок «Мелочь» (агрегат мелких файлов/папок)"}
+    onclick={() => showAggregate.set(!$showAggregate)}
+  >
+    <span
+      class="dot"
+      style="background:{$showAggregate
+        ? hex(AGGREGATE_COLOR)
+        : 'var(--text-muted)'}"
+    ></span>
+    <span class="lbl">Мелочь</span>
+  </button>
+
   <!-- Режим агрегатора: доля объёма папки (рекурсивно) / точный размер
-       (текущий уровень). Мельче порога сворачиваются И файлы, И папки в «Прочее». -->
+       (текущий уровень). Мельче порога сворачиваются И файлы, И папки в «Мелочь». -->
   <div class="seg" role="group" aria-label="Режим агрегатора">
     <button
       class="seg-btn"
@@ -170,52 +158,66 @@
     white-space: nowrap;
   }
 
-  /* Кастомный чекбокс — матовый, акцент при отметке. */
-  .check {
+  .cats-group {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1);
+    overflow: hidden;
+  }
+  .cat-chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
-    cursor: pointer;
-    user-select: none;
+    gap: 4px;
     white-space: nowrap;
-    color: var(--text);
-  }
-  .check input {
-    position: absolute;
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-  .box {
-    position: relative;
-    width: 1rem;
-    height: 1rem;
-    border-radius: var(--r-sm);
     background: var(--surface-2);
     border: 1px solid var(--border);
+    padding: 0.2rem 0.5rem;
+    margin: 0;
+    cursor: pointer;
+    border-radius: var(--r-pill);
     transition:
       background var(--motion-micro) var(--ease-out),
       border-color var(--motion-micro) var(--ease-out);
   }
-  .check input:checked ~ .box {
-    background: var(--accent-soft);
-    border-color: var(--accent);
+  .cat-chip:hover {
+    border-color: rgba(255, 255, 255, 0.2);
+    background: #232327;
   }
-  .box::after {
-    content: "";
-    position: absolute;
-    left: 5px;
-    top: 2px;
-    width: 3px;
+  .cat-chip.off {
+    opacity: 0.55;
+  }
+  .cat-chip.off .dot {
+    background: #444448 !important;
+  }
+  .cat-chip.off .lbl {
+    color: var(--text-muted);
+  }
+  .cat-chip .dot {
+    width: 6px;
     height: 6px;
-    border: solid var(--accent);
-    border-width: 0 2px 2px 0;
-    transform: rotate(45deg);
-    opacity: 0;
-    transition: opacity var(--motion-micro) var(--ease-out);
+    border-radius: 50%;
+    flex-shrink: 0;
   }
-  .check input:checked ~ .box::after {
-    opacity: 1;
+  .cat-chip .lbl {
+    font-size: 0.72rem;
+    color: var(--text);
+  }
+  .reset-cats {
+    font-family: var(--font-label);
+    font-size: 0.62rem;
+    letter-spacing: var(--track-caps);
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: var(--r-pill);
+    padding: 0.25rem 0.65rem;
+    cursor: pointer;
+    white-space: nowrap;
+    margin-left: 0.3rem;
+    transition: background var(--motion-micro) var(--ease-out);
+  }
+  .reset-cats:hover {
+    background: rgba(215, 25, 33, 0.22);
   }
 
   .field {
@@ -251,7 +253,6 @@
     border-color: var(--accent);
   }
 
-  /* Тонкий вертикальный разделитель между фильтром и агрегатором. */
   .sep {
     width: 1px;
     align-self: stretch;
@@ -259,7 +260,6 @@
     margin: 0 0.2rem;
   }
 
-  /* Сегмент-переключатель режима агрегатора (доля / размер). */
   .seg {
     display: inline-flex;
     border: 1px solid var(--border);
@@ -286,7 +286,6 @@
     color: var(--text);
   }
 
-  /* Ползунок порога: минималистичный трек, акцентный thumb. */
   .slider input[type="range"] {
     width: 7rem;
     height: 2px;
@@ -319,21 +318,5 @@
     font-size: 0.76rem;
     color: var(--text);
     font-variant-numeric: tabular-nums;
-  }
-
-  .reset {
-    font: inherit;
-    font-size: 0.76rem;
-    color: var(--accent);
-    background: var(--accent-soft);
-    border: 1px solid var(--accent);
-    border-radius: var(--r-pill);
-    padding: 0.25rem 0.7rem;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background var(--motion-micro) var(--ease-out);
-  }
-  .reset:hover {
-    background: rgba(215, 25, 33, 0.22);
   }
 </style>

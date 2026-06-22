@@ -9,6 +9,7 @@
   import Breadcrumbs from "./lib/components/Breadcrumbs.svelte";
   import Footer from "./lib/components/Footer.svelte";
   import Scene from "./lib/components/Scene.svelte";
+  import CleanupConfirm from "./lib/components/CleanupConfirm.svelte";
 </script>
 
 <div class="app">
@@ -19,6 +20,9 @@
   </main>
   <Footer />
 </div>
+
+<!-- Общепрограммный модал (по центру, поверх всего): подтверждение сноса. -->
+<CleanupConfirm />
 
 <style>
   .app {

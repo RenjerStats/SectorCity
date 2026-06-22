@@ -118,7 +118,7 @@ const SPECS: &[MockSpec] = &[
         is_cleanup: true,
     },
     MockSpec {
-        name: "Прочее",
+        name: "Мелочь",
         is_dir: false,
         size: 1_300_000_000,
         age_days: 300,
@@ -144,7 +144,7 @@ pub fn mock_level(root: &str) -> Vec<ScanNode> {
             };
             let mtime = BASE_MTIME - spec.age_days * SECONDS_PER_DAY;
             let mut flags = Vec::new();
-            if spec.name == "Прочее" {
+            if spec.name == "Мелочь" {
                 flags.push(NodeFlag::Aggregated);
             }
             if spec.is_cleanup {
@@ -160,6 +160,9 @@ pub fn mock_level(root: &str) -> Vec<ScanNode> {
                 atime: mtime,
                 child_count: spec.child_count,
                 category: spec.category,
+                // Мок плоский (без детей): маску ставим по собственной категории
+                // узла — демо-фильтр по категориям тогда работает и до скана.
+                category_mask: crate::scan::category_bit(spec.category),
                 flags,
                 // Мок плоский: реальные дети (и превью depth>1) придут со сканером.
                 children: Vec::new(),

@@ -26,7 +26,13 @@ export type UiCommand =
   | { kind: "cancel" }
   | { kind: "reset" }
   /** Прыжок по хлебной крошке (крошки переехали в sub-header). */
-  | { kind: "goToCrumb"; index: number };
+  | { kind: "goToCrumb"; index: number }
+  /** Войти в режим «Сканер мусора» (vision §I.7). */
+  | { kind: "enterCleanup" }
+  /** Выйти из режима сканера мусора в обычный Обзор. */
+  | { kind: "exitCleanup" }
+  /** Обновить текущий уровень на сцене. */
+  | { kind: "refresh" };
 
 /** Текущая невыполненная команда; `null` — нет команды (исполнитель её снимает). */
 export const uiCommand = atom<UiCommand | null>(null);
@@ -45,6 +51,18 @@ export const filtersOpen = atom<boolean>(false);
 /** Переключить видимость панели фильтров. */
 export function toggleFilters(): void {
   filtersOpen.set(!filtersOpen.get());
+}
+
+/**
+ * Открыт ли модал подтверждения сноса (кнопка «Снести (X)» в режиме cleanup).
+ * Слайс 1: модал показывает список и итог, но реального удаления не делает
+ * (нужен крейт `trash` — отдельный проход). Закрытие — `Отмена`/Esc.
+ */
+export const cleanupConfirmOpen = atom<boolean>(false);
+
+/** Открыть/закрыть модал подтверждения сноса. */
+export function setCleanupConfirm(open: boolean): void {
+  cleanupConfirmOpen.set(open);
 }
 
 /* ──────────────────────────────── слот footer ───────────────────────────── */

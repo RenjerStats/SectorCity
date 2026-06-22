@@ -18,6 +18,7 @@
   import DiskFillBar from "./footer/DiskFillBar.svelte";
   import Legend from "./Legend.svelte";
   import FilterPanel from "./FilterPanel.svelte";
+  import CleanupPanel from "./CleanupPanel.svelte";
 
   let override = $derived($footerSlot);
   let mode = $derived($appMode);
@@ -29,6 +30,8 @@
     {@render override()}
   {:else if mode.kind === "scanning"}
     <DiskMapProgress progress={$scanProgress} />
+  {:else if mode.kind === "cleanup"}
+    <CleanupPanel />
   {:else if filters}
     <FilterPanel />
   {:else}

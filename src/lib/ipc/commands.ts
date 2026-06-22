@@ -6,7 +6,7 @@
  * реализованы Scanner/Aggregator. Сигнатуры зафиксированы заранее.
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { AggSpec, ScanNode } from "./contract";
+import type { AggSpec, DeleteResult, ScanNode } from "./contract";
 
 /**
  * Запустить скан корня; прогресс приходит событиями `scan://progress`.
@@ -46,4 +46,9 @@ export function getNodeDetail(path: string): Promise<ScanNode | null> {
 /** Поиск по текущему снимку ФС. */
 export function search(query: string): Promise<ScanNode[]> {
   return invoke("search", { query });
+}
+
+/** Переместить файлы/папки в Корзину. */
+export function deleteToTrash(paths: string[]): Promise<DeleteResult> {
+  return invoke("delete_to_trash", { paths });
 }

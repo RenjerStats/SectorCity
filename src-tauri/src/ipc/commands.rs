@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
 
-use super::contract::{AggSpec, ScanNode, ScanProgress};
+use super::contract::{AggSpec, DeleteResult, ScanNode, ScanProgress};
 use crate::error::{AppError, AppResult};
 use crate::scan::{scan_with, snapshot, ScanOutcome};
 use crate::state::AppState;
@@ -167,4 +167,78 @@ pub async fn get_node_detail(
 pub async fn search(query: String) -> AppResult<Vec<ScanNode>> {
     tracing::info!(%query, "search (заглушка)");
     Ok(Vec::new())
+}
+
+/// Переместить список файлов/папок в Корзину.
+/// Обновляет дерево в памяти и перезаписывает снимок SQLite.
+#[tauri::command]
+pub async fn delete_to_trash(paths: Vec<String>, app: AppHandle) -> AppResult<DeleteResult> {
+    tracing::info!(?paths, "delete_to_trash");
+
+    let app_handle = app.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        let mut deleted = Vec::new();
+        let mut failed = Vec::new();
+        let mut freed = 0;
+
+        let mut scan_guard = state.scan.lock().unwrap();
+
+        for p in paths {
+            let path_ref = std::path::Path::new(&p);
+
+            // Проверим замок безопасности: если файл помечен как системный, снос заблокирован
+            let mut is_locked = false;
+            if let Some(ref tree) = *scan_guard {
+                if let Some(idx) = tree.index_of(&p) {
+                    is_locked = tree.nodes[idx].is_locked;
+                }
+            }
+
+            if is_locked {
+                tracing::warn!(%p, "попытка удалить заблокированный узел отклонена");
+                failed.push(p);
+                continue;
+            }
+
+            // Перемещение в корзину через crate trash
+            match trash::delete(path_ref) {
+                Ok(_) => {
+                    let mut freed_bytes = 0;
+                    if let Some(ref mut tree) = *scan_guard {
+                        if let Some(bytes) = tree.delete_node(&p) {
+                            freed_bytes = bytes;
+                        }
+                    }
+                    freed += freed_bytes;
+                    deleted.push(p);
+                }
+                Err(e) => {
+                    tracing::error!(%p, error = %e, "не удалось переместить в корзину");
+                    failed.push(p);
+                }
+            }
+        }
+
+        // Обновить снимок SQLite
+        if !deleted.is_empty() {
+            if let Some(ref tree) = *scan_guard {
+                if let Some(db_path) = snapshot_db_path(&app_handle) {
+                    if let Err(e) = snapshot::save(tree, &db_path) {
+                        tracing::warn!(error = %e, "не удалось перезаписать снимок после удаления");
+                    }
+                }
+            }
+        }
+
+        DeleteResult {
+            deleted,
+            freed,
+            failed,
+        }
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("задача удаления прервана: {e}")))?;
+
+    Ok(outcome)
 }
