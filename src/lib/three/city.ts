@@ -331,6 +331,19 @@ function baseBuildingColor(node: ScanNode): number {
 }
 
 /**
+ * Базовый цвет района (плот + силуэт). Обычная папка → нейтральный тинт-плот;
+ * синтетический блок «Прочее» (флаг `aggregated`) стал размещённым кварталом —
+ * сохраняет собственный цвет-агрегат, чтобы читаться как «объединённая мелочь»,
+ * а не как обычная папка. Плот/силуэт держат цвет per-instance (material — белый),
+ * как и здания: так подсветка-фильтр может притенять отдельные районы.
+ */
+function districtBaseColor(node: ScanNode): number {
+  return node.flags.includes("aggregated")
+    ? AGGREGATE_COLOR
+    : DISTRICT_PLOT_COLOR;
+}
+
+/**
  * Построить уровень `nodes` в собственной `Group` (канонически, в прямоугольнике
  * `span`). Группа создаётся в identity — размещение в мир задаёт навигатор.
  *
@@ -429,14 +442,16 @@ export function buildLevel(
   const coarseReal: Matrix4[] = [];
 
   if (districts.length > 0) {
+    // Материал белый: реальный цвет района держим per-instance (как у зданий),
+    // чтобы «Прочее»-квартал нёс свой цвет-агрегат и чтобы фильтр мог притенять.
     plotMesh = new InstancedMesh(
       new BoxGeometry(1, 1, 1),
-      new MeshLambertMaterial({ color: new Color(DISTRICT_PLOT_COLOR) }),
+      new MeshLambertMaterial(),
       districts.length,
     );
     coarseMesh = new InstancedMesh(
       new BoxGeometry(1, 1, 1),
-      new MeshLambertMaterial({ color: new Color(DISTRICT_PLOT_COLOR) }),
+      new MeshLambertMaterial(),
       districts.length,
     );
     districts.forEach((d, j) => {
@@ -456,11 +471,11 @@ export function buildLevel(
       coarseReal[j] = dummy.matrix.clone();
       coarseMesh!.setMatrixAt(j, dummy.matrix); // старт: далёкий → силуэт виден
 
-      // Per-instance цвет плота/силуэта = белый: произведение с material.color
-      // даёт DISTRICT_PLOT_COLOR (декор домножает material.color — не ломается),
-      // зато подсветка-фильтр может притенять отдельные районы (setHighlight).
-      plotMesh!.setColorAt(j, color.set(0xffffff));
-      coarseMesh!.setColorAt(j, color.set(0xffffff));
+      // Per-instance цвет = базовый цвет района (тинт-плот / агрегат для «Прочее»);
+      // material белый → итог = базовый цвет, а декор домножает material (не ломается),
+      // подсветка-фильтр притеняет per-instance (setHighlight).
+      plotMesh!.setColorAt(j, color.set(districtBaseColor(d.node)));
+      coarseMesh!.setColorAt(j, color.set(districtBaseColor(d.node)));
 
       districtPick[j] = { node: d.node, drillTarget: d.node };
       districtIndexByPath.set(d.node.path, j);
@@ -584,8 +599,10 @@ export function buildLevel(
       }
       plotMesh.instanceMatrix.needsUpdate = true;
 
+      // Цвет района — per-instance; декор гасит общий material (серый), сохраняя
+      // относительные тона районов (в т.ч. «Прочее»).
       const mat = plotMesh.material as MeshLambertMaterial;
-      mat.color.copy(new Color(DISTRICT_PLOT_COLOR).multiplyScalar(0.35));
+      mat.color.setRGB(0.35, 0.35, 0.35);
       mat.transparent = false;
       mat.opacity = 1;
       mat.depthWrite = true;
@@ -599,7 +616,7 @@ export function buildLevel(
         coarseMesh.setMatrixAt(j, ZERO_MATRIX);
       coarseMesh.instanceMatrix.needsUpdate = true;
       const mat = coarseMesh.material as MeshLambertMaterial;
-      mat.color.copy(new Color(DISTRICT_PLOT_COLOR).multiplyScalar(0.35));
+      mat.color.setRGB(0.35, 0.35, 0.35);
       mat.transparent = false;
       mat.opacity = 1;
       mat.depthWrite = true;
@@ -621,7 +638,7 @@ export function buildLevel(
     if (plotMesh) {
       plotMesh.visible = true;
       const mat = plotMesh.material as MeshLambertMaterial;
-      mat.color.setHex(DISTRICT_PLOT_COLOR);
+      mat.color.setRGB(1, 1, 1); // цвет района — per-instance
       mat.transparent = false;
       mat.opacity = 1;
       mat.depthWrite = true;
@@ -629,7 +646,7 @@ export function buildLevel(
     if (markerMesh) markerMesh.visible = true;
     if (coarseMesh) {
       const mat = coarseMesh.material as MeshLambertMaterial;
-      mat.color.setHex(DISTRICT_PLOT_COLOR);
+      mat.color.setRGB(1, 1, 1); // цвет района — per-instance
       mat.transparent = false;
       mat.opacity = 1;
       mat.depthWrite = true;
@@ -692,10 +709,10 @@ export function buildLevel(
         if (buildingMesh.instanceColor)
           buildingMesh.instanceColor.needsUpdate = true;
       }
-      // Районы (плот + силуэт): база — белый (см. инициализацию выше).
+      // Районы (плот + силуэт): база — цвет района (тинт-плот / агрегат «Прочее»).
       if (plotMesh && coarseMesh) {
         districts.forEach((d, j) => {
-          color.setRGB(1, 1, 1);
+          color.set(districtBaseColor(d.node));
           if (match && !match(d.node)) color.multiplyScalar(DIM_FACTOR);
           plotMesh!.setColorAt(j, color);
           coarseMesh!.setColorAt(j, color);

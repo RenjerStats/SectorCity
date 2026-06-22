@@ -201,14 +201,13 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
     expect(buildMat.color.g).toBeCloseTo(0.35);
     expect(buildMat.color.b).toBeCloseTo(0.35);
 
+    // Цвет района теперь per-instance (как у зданий): декор гасит общий material
+    // до нейтрального серого 0.35, сохраняя относительные тона районов.
     const plotMat = plot.material as any;
     expect(plotMat.transparent).toBe(false);
-    const expectedPlotColor = new Color(DISTRICT_PLOT_COLOR).multiplyScalar(
-      0.35,
-    );
-    expect(plotMat.color.r).toBeCloseTo(expectedPlotColor.r);
-    expect(plotMat.color.g).toBeCloseTo(expectedPlotColor.g);
-    expect(plotMat.color.b).toBeCloseTo(expectedPlotColor.b);
+    expect(plotMat.color.r).toBeCloseTo(0.35);
+    expect(plotMat.color.g).toBeCloseTo(0.35);
+    expect(plotMat.color.b).toBeCloseTo(0.35);
 
     level.dispose();
   });

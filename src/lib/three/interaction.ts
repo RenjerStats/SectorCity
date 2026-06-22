@@ -32,10 +32,11 @@ import { activeView, isInteractive } from "./navigator";
 export interface InteractionCallbacks {
   /** Наведение сменилось (узел или `null`, когда курсор ушёл со зданий). */
   onHover(node: ScanNode | null): void;
-  /** Клик по району (папке) → drill (бесшовный зум считает навигатор сам). */
+  /** Клик по району (папке) ИЛИ по блоку «Прочее» → drill (навигатор сам считает
+   *  зум; «Прочее» бэк раскрывает по синтетическому пути в его хвост). */
   onDrill(node: ScanNode): void;
   /** Клик по зданию-файлу → SELECT (карточка над зданием); `null` = снять выбор
-   *  (клик мимо зданий). Район уходит в `onDrill`, синтетическое «Прочее» — никуда. */
+   *  (клик мимо зданий). Район и «Прочее» уходят в `onDrill`, не сюда. */
   onSelect(node: ScanNode | null): void;
 }
 
@@ -185,17 +186,14 @@ export function setupInteraction(
       setSelected(null); // клик мимо разрешимого узла — снять выбор
       return;
     }
-    // Drill только в реальные папки. Агрегированное «Прочее» и файлы — не районы.
-    // Цель — drillTarget: для вложенного превью это родительский район.
+    // Drill в реальные папки-районы И в навигируемый блок «Прочее» (бэк раскрывает
+    // синтетический путь `{уровень}::<other>` в его хвост). Цель — drillTarget:
+    // внутри вложенного превью это родительский район (не aggregated), поэтому клик
+    // по «Прочее» в превью ведёт в район; «Прочее» верхнего уровня drill'ит само себя.
     const t = info.drillTarget;
-    if (t.isDir && !t.flags.includes("aggregated")) {
+    if (t.isDir || t.flags.includes("aggregated")) {
       setSelected(null); // уходим на новый уровень — старый выбор не актуален
       cb.onDrill(t);
-      return;
-    }
-    // Не район — это файл/лист. Синтетическое «Прочее» не выбираем (нет пути).
-    if (info.node.flags.includes("aggregated")) {
-      setSelected(null);
       return;
     }
     setSelected(hit, info.node);

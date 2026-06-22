@@ -31,12 +31,12 @@
 
   let f = $derived($candidateFilter);
   let a = $derived($aggSettings);
-  // Ползунок ходит в процентах (1–10%, шаг 1), в сторе — доля (0.01–0.10).
-  let pct = $derived(Math.round(a.fraction * 100));
 
   function setAggMode(mode: AggMode) {
     aggSettings.set({ ...a, mode });
   }
+  // Ползунок доли: мин. доля объёма папки (в %), мельче которой тайл сворачивается
+  // в «Прочее» (больше % → агрессивнее). Хранится долей 0..1; в UI — проценты.
   function setFraction(percent: number) {
     aggSettings.set({ ...a, fraction: percent / 100 });
   }
@@ -106,8 +106,8 @@
   <span class="sep" aria-hidden="true"></span>
   <span class="cap">АГРЕГАТ</span>
 
-  <!-- Режим агрегатора: доля объёма папки (рекурсивно) / точный размер (текущий
-       уровень). Папки не сворачиваются — только мелкие файлы в блок «Прочее». -->
+  <!-- Режим агрегатора: доля объёма папки (рекурсивно) / точный размер
+       (текущий уровень). Мельче порога сворачиваются И файлы, И папки в «Прочее». -->
   <div class="seg" role="group" aria-label="Режим агрегатора">
     <button
       class="seg-btn"
@@ -127,16 +127,16 @@
 
   {#if a.mode === "relative"}
     <label class="field slider">
-      <span class="lbl">мельче</span>
+      <span class="lbl">мин. доля</span>
       <input
         type="range"
         min="1"
-        max="10"
+        max="20"
         step="1"
-        value={pct}
+        value={Math.round(a.fraction * 100)}
         oninput={(e) => setFraction(Number(e.currentTarget.value))}
       />
-      <span class="val">{pct}%</span>
+      <span class="val">{Math.round(a.fraction * 100)}%</span>
     </label>
   {:else}
     <label class="field">
