@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
 
-use super::contract::{ScanNode, ScanProgress};
+use super::contract::{AggSpec, ScanNode, ScanProgress};
 use crate::error::{AppError, AppResult};
 use crate::scan::{scan_with, snapshot, ScanOutcome};
 use crate::state::AppState;
@@ -117,21 +117,22 @@ pub fn cancel_scan(state: State<'_, AppState>) -> AppResult<()> {
     Ok(())
 }
 
-/// Дети уровня `path` + tail-агрегация в «Прочее», с превью на `depth` уровней
+/// Дети уровня `path` + агрегация мелочи в «Прочее», с превью на `depth` уровней
 /// вниз (`depth > 1` → папки несут вложенный treemap своих детей; см.
-/// `ScanTree::level`). До первого скана отдаём мок (плоский, превью нет —
-/// сквозной поток фазы 0 продолжает работать без выбора реальной папки).
+/// `ScanTree::level`). Порог агрегации задаёт UI через `agg` (относительный по
+/// доле объёма папки / абсолютный по байтам — см. [`AggSpec`]). До первого скана
+/// отдаём мок (плоский, превью нет — сквозной поток фазы 0 работает без скана).
 #[tauri::command]
 pub async fn get_level(
     path: String,
-    top_n: u32,
+    agg: AggSpec,
     depth: u32,
     state: State<'_, AppState>,
 ) -> AppResult<Vec<ScanNode>> {
-    tracing::info!(%path, top_n, depth, "get_level");
+    tracing::info!(%path, ?agg, depth, "get_level");
     let guard = state.scan.lock().unwrap();
     match guard.as_ref() {
-        Some(tree) => Ok(tree.level(&path, top_n as usize, depth)),
+        Some(tree) => Ok(tree.level(&path, &agg, depth)),
         None => Ok(super::mock::mock_level(&path)),
     }
 }

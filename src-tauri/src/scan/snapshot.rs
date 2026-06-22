@@ -263,9 +263,16 @@ mod tests {
         assert_eq!(loaded.root_node().path, tree.root_node().path);
         // Запрос уровня из загруженного дерева совпадает по количеству детей.
         let root_path = tree.root_node().path.to_string_lossy().into_owned();
+        // Без агрегации (fraction = 0, без потолка) — сравниваем «сырые» уровни.
+        let spec = crate::ipc::contract::AggSpec {
+            mode: crate::ipc::contract::AggMode::Relative,
+            fraction: 0.0,
+            min_bytes: 0,
+            top_n_cap: 0,
+        };
         assert_eq!(
-            loaded.level(&root_path, 0, 1).len(),
-            tree.level(&root_path, 0, 1).len()
+            loaded.level(&root_path, &spec, 1).len(),
+            tree.level(&root_path, &spec, 1).len()
         );
 
         std::fs::remove_file(&db).ok();

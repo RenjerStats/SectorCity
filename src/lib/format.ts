@@ -19,7 +19,10 @@ export function formatSize(bytes: number): string {
  * теперь dot-шрифт Ndot77 покрывает кириллицу, но раздельные части всё ещё
  * удобны, если число и единицу нужно стилизовать по-разному.
  */
-export function formatSizeParts(bytes: number): { value: string; unit: string } {
+export function formatSizeParts(bytes: number): {
+  value: string;
+  unit: string;
+} {
   const s = formatSize(bytes);
   const i = s.lastIndexOf(" ");
   return i === -1

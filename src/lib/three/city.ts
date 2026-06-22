@@ -46,6 +46,7 @@ import {
 import { hierarchy, treemap, treemapSquarify } from "d3-hierarchy";
 import type { ScanNode } from "../ipc/contract";
 import {
+  AGGREGATE_COLOR,
   CATEGORY_COLOR,
   CLEANUP_MARKER_COLOR,
   DISTRICT_PLOT_COLOR,
@@ -159,6 +160,9 @@ export interface Level {
   readonly group: Group;
   /** Путь корня этого уровня (для крошек/идентификации). */
   readonly path: string;
+  /** Прямоугольник, в котором построен уровень — чтобы пересобрать его на месте
+   *  (смена порога агрегатора) с тем же масштабом, не трогая камеру. */
+  readonly span: LevelSpan;
   /** Мост пикинга/LOD активного уровня. */
   readonly view: CityView;
   /** Размещение дочернего района по пути (канонический фрейм уровня), либо `null`. */
@@ -315,6 +319,18 @@ function heightFromMtime(mtime: number, nowSeconds: number): number {
 const ZERO_MATRIX = new Matrix4().makeScale(0, 0, 0);
 
 /**
+ * Базовый цвет здания. Папка-превью → структурный тинт плота; синтетический блок
+ * «Прочее» (флаг `aggregated`) → собственный цвет-агрегата (не из категорийной
+ * палитры — чтобы не путать с папкой/категорией); иначе — цвет категории. Канал
+ * цвета остаётся за категорией; агрегат намеренно выделен отдельным тоном.
+ */
+function baseBuildingColor(node: ScanNode): number {
+  if (node.isDir) return DISTRICT_PLOT_COLOR;
+  if (node.flags.includes("aggregated")) return AGGREGATE_COLOR;
+  return CATEGORY_COLOR[node.category];
+}
+
+/**
  * Построить уровень `nodes` в собственной `Group` (канонически, в прямоугольнике
  * `span`). Группа создаётся в identity — размещение в мир задаёт навигатор.
  *
@@ -385,10 +401,7 @@ export function buildLevel(
       // Вложенные превью стартуют скрытыми (район далёкий → силуэт); файлы видны.
       const hidden = b.districtIdx !== null;
       buildingMesh!.setMatrixAt(i, hidden ? ZERO_MATRIX : dummy.matrix);
-      const nodeColor = b.node.isDir
-        ? DISTRICT_PLOT_COLOR
-        : CATEGORY_COLOR[b.node.category];
-      buildingMesh!.setColorAt(i, color.set(nodeColor));
+      buildingMesh!.setColorAt(i, color.set(baseBuildingColor(b.node)));
 
       if (b.districtIdx !== null) lod[b.districtIdx].buildingIds.push(i);
 
@@ -648,6 +661,7 @@ export function buildLevel(
   return {
     group,
     path,
+    span,
     view,
     childPlacement(p) {
       return placements.get(p) ?? null;
@@ -671,10 +685,7 @@ export function buildLevel(
       // Здания: база — цвет категории (папка-превью → структурный цвет плота).
       if (buildingMesh) {
         buildings.forEach((b, i) => {
-          const base = b.node.isDir
-            ? DISTRICT_PLOT_COLOR
-            : CATEGORY_COLOR[b.node.category];
-          color.set(base);
+          color.set(baseBuildingColor(b.node));
           if (match && !match(b.node)) color.multiplyScalar(DIM_FACTOR);
           buildingMesh!.setColorAt(i, color);
         });

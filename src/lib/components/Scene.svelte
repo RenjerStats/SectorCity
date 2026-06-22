@@ -26,10 +26,16 @@
     breadcrumbs,
     candidateFilter,
     searchQuery,
+    aggSettings,
     type CandidateFilter,
   } from "../store/mode";
   import { uiCommand, levelSummary } from "../store/ui";
-  import type { Category, ScanNode, ScanProgress } from "../ipc/contract";
+  import type {
+    AggSpec,
+    Category,
+    ScanNode,
+    ScanProgress,
+  } from "../ipc/contract";
 
   // Этот компонент — ЕДИНСТВЕННЫЙ владелец 3D-сцены. Он монтирует canvas,
   // держит жизненный цикл сцены и наполняет её данными из IPC. Связь с
@@ -51,10 +57,24 @@
   let statusKind = $state<StatusKind>("none");
   let statusErrors = $state(0);
 
-  /** Топ-N зданий на уровень; хвост бэк сворачивает в «Прочее». */
-  const TOP_N = 50;
+  /** Потолок числа зданий-файлов на уровень (страховка перфо). Основной контрол
+   *  агрегации — порог в `aggSettings`; этот лишь не даёт уровню распухнуть. */
+  const TOP_N_CAP = 150;
   /** Длительность зума камеры при drill (docs: ~500 мс). */
   const DRILL_MS = 500;
+  /** Дебаунс пересборки города при движении ползунка порога (≈ось «на лету»). */
+  const AGG_DEBOUNCE_MS = 150;
+
+  /** Текущие параметры агрегации из стора → контракт `AggSpec` для `getLevel`. */
+  function aggSpec(): AggSpec {
+    const a = aggSettings.get();
+    return {
+      mode: a.mode,
+      fraction: a.fraction,
+      minBytes: a.minBytes,
+      topNCap: TOP_N_CAP,
+    };
+  }
 
   /** Сводка уровня для footer (полоса заполнения по категориям): композиция
    * прямых детей. Низкочастотно — пишем в стор на каждой смене уровня. */
@@ -112,6 +132,32 @@
     );
   }
 
+  /** Дебаунс-таймер пересборки города при смене порога агрегатора. */
+  let aggTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Перезапросить текущий уровень с новым порогом и пересобрать город НА МЕСТЕ
+   *  (камера не дёргается). Структурная операция: меняется, что свёрнуто в «Прочее».
+   *  Гард: не лезем во время зума/скана; путь берём из последней крошки. */
+  async function reaggregate() {
+    if (!nav) return;
+    const mode = appMode.get();
+    if (mode.kind === "zooming" || mode.kind === "scanning") return;
+    const crumbs = breadcrumbs.get();
+    if (crumbs.length === 0) return;
+    const path = crumbs[crumbs.length - 1].path;
+    const nodes = await getLevel(path, aggSpec(), 2);
+    nav.rebuildActive(nodes);
+    interaction?.clearHover();
+    setSummary(nodes, path);
+  }
+
+  /** Запланировать пересборку с дебаунсом — «на лету», но без холостых пересчётов
+   *  на каждом пикселе ползунка. */
+  function scheduleReaggregate() {
+    if (aggTimer) clearTimeout(aggTimer);
+    aggTimer = setTimeout(() => void reaggregate(), AGG_DEBOUNCE_MS);
+  }
+
   /** Имя уровня из пути для крошки (последний сегмент, или сам путь). */
   function crumbName(path: string): string {
     if (!path) return "Демо";
@@ -123,7 +169,7 @@
    * дальше чем на уровень). Возвращает число узлов (0 → пусто, нечего показывать). */
   async function loadRoot(path: string): Promise<number> {
     // depth=2: каждый район несёт превью своих детей → вложенный treemap + LOD.
-    const nodes = await getLevel(path, TOP_N, 2);
+    const nodes = await getLevel(path, aggSpec(), 2);
     nav?.reset(nodes, path);
     interaction?.clearHover();
     setSummary(nodes, path);
@@ -179,6 +225,18 @@
     // subscribe срабатывает сразу с текущим значением — nav уже создан выше.
     const offFilter = candidateFilter.subscribe(() => refreshHighlight());
     const offSearch = searchQuery.subscribe(() => refreshHighlight());
+
+    // Смена порога агрегатора → структурная пересборка текущего уровня (с дебаунсом).
+    // Первый вызов subscribe — синхронный с текущим значением; стартовый уровень
+    // грузится ниже отдельно, поэтому пропускаем его (гард `aggFirst`).
+    let aggFirst = true;
+    const offAgg = aggSettings.subscribe(() => {
+      if (aggFirst) {
+        aggFirst = false;
+        return;
+      }
+      scheduleReaggregate();
+    });
 
     // Команды из header (Scan/Cancel/Reset) — единственный канал «шапка → сцена»
     // (docs §1: миры общаются только через стор). Снимаем команду ДО исполнения,
@@ -239,6 +297,8 @@
       offCard();
       offFilter();
       offSearch();
+      offAgg();
+      if (aggTimer) clearTimeout(aggTimer);
       offCmd();
       window.removeEventListener("keydown", onKey);
       unlisten?.();
@@ -295,7 +355,7 @@
     hoveredNode.set(null);
 
     // Дети района (превью +1) — это содержимое нового активного уровня.
-    const childNodes = await getLevel(node.path, TOP_N, 2);
+    const childNodes = await getLevel(node.path, aggSpec(), 2);
     await nav.drill(node, childNodes, DRILL_MS);
     interaction?.clearHover();
     setSummary(childNodes, node.path);

@@ -6,7 +6,7 @@
  * реализованы Scanner/Aggregator. Сигнатуры зафиксированы заранее.
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { ScanNode } from "./contract";
+import type { AggSpec, ScanNode } from "./contract";
 
 /**
  * Запустить скан корня; прогресс приходит событиями `scan://progress`.
@@ -29,13 +29,13 @@ export function currentRoot(): Promise<string | null> {
   return invoke("current_root");
 }
 
-/** Дети уровня + превью на +1 уровень; хвост уже свёрнут в «Прочее». */
+/** Дети уровня + превью на +1 уровень; мелочь уже свёрнута в «Прочее» по `agg`. */
 export function getLevel(
   path: string,
-  topN: number,
+  agg: AggSpec,
   depth: number,
 ): Promise<ScanNode[]> {
-  return invoke("get_level", { path, topN, depth });
+  return invoke("get_level", { path, agg, depth });
 }
 
 /** Полная правда по одному узлу — для карточки/тултипа. */

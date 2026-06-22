@@ -5,10 +5,19 @@
    * Пишет в стор `candidateFilter`; рендер сам гасит несовпадающие узлы (Scene
    * подписан и зовёт `navigator.applyHighlight`). Логика прежняя, изменён облик.
    */
-  import { candidateFilter, filterActive } from "../store/mode";
+  import { candidateFilter, filterActive, aggSettings } from "../store/mode";
+  import type { AggMode } from "../ipc/contract";
 
   const GB = 1024 ** 3;
   const MB = 1024 ** 2;
+  const KB = 1024;
+
+  // Пресеты порога для абсолютного режима агрегатора (сворачивать всё мельче).
+  const AGG_SIZE_PRESETS = [
+    { label: "< 100 КБ", value: 100 * KB },
+    { label: "< 1 МБ", value: MB },
+    { label: "< 10 МБ", value: 10 * MB },
+  ];
   const SIZE_PRESETS = [
     { label: "любой", value: 0 },
     { label: "≥ 100 МБ", value: 100 * MB },
@@ -21,6 +30,19 @@
   ];
 
   let f = $derived($candidateFilter);
+  let a = $derived($aggSettings);
+  // Ползунок ходит в процентах (1–10%, шаг 1), в сторе — доля (0.01–0.10).
+  let pct = $derived(Math.round(a.fraction * 100));
+
+  function setAggMode(mode: AggMode) {
+    aggSettings.set({ ...a, mode });
+  }
+  function setFraction(percent: number) {
+    aggSettings.set({ ...a, fraction: percent / 100 });
+  }
+  function setMinBytes(v: number) {
+    aggSettings.set({ ...a, minBytes: v });
+  }
 
   function toggleCandidates() {
     candidateFilter.set({ ...f, onlyCandidates: !f.onlyCandidates });
@@ -79,6 +101,55 @@
 
   {#if $filterActive}
     <button class="reset" onclick={reset}>Сбросить</button>
+  {/if}
+
+  <span class="sep" aria-hidden="true"></span>
+  <span class="cap">АГРЕГАТ</span>
+
+  <!-- Режим агрегатора: доля объёма папки (рекурсивно) / точный размер (текущий
+       уровень). Папки не сворачиваются — только мелкие файлы в блок «Прочее». -->
+  <div class="seg" role="group" aria-label="Режим агрегатора">
+    <button
+      class="seg-btn"
+      class:active={a.mode === "relative"}
+      onclick={() => setAggMode("relative")}
+    >
+      доля
+    </button>
+    <button
+      class="seg-btn"
+      class:active={a.mode === "absolute"}
+      onclick={() => setAggMode("absolute")}
+    >
+      размер
+    </button>
+  </div>
+
+  {#if a.mode === "relative"}
+    <label class="field slider">
+      <span class="lbl">мельче</span>
+      <input
+        type="range"
+        min="1"
+        max="10"
+        step="1"
+        value={pct}
+        oninput={(e) => setFraction(Number(e.currentTarget.value))}
+      />
+      <span class="val">{pct}%</span>
+    </label>
+  {:else}
+    <label class="field">
+      <span class="lbl">мельче</span>
+      <select
+        value={a.minBytes}
+        onchange={(e) => setMinBytes(Number(e.currentTarget.value))}
+      >
+        {#each AGG_SIZE_PRESETS as p (p.value)}
+          <option value={p.value}>{p.label}</option>
+        {/each}
+      </select>
+    </label>
   {/if}
 </div>
 
@@ -178,6 +249,76 @@
   select:hover,
   select:focus {
     border-color: var(--accent);
+  }
+
+  /* Тонкий вертикальный разделитель между фильтром и агрегатором. */
+  .sep {
+    width: 1px;
+    align-self: stretch;
+    background: var(--hairline);
+    margin: 0 0.2rem;
+  }
+
+  /* Сегмент-переключатель режима агрегатора (доля / размер). */
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: var(--r-pill);
+    overflow: hidden;
+  }
+  .seg-btn {
+    font: inherit;
+    font-size: 0.74rem;
+    color: var(--text-2);
+    background: var(--surface-2);
+    border: none;
+    padding: 0.22rem 0.6rem;
+    cursor: pointer;
+    transition:
+      background var(--motion-micro) var(--ease-out),
+      color var(--motion-micro) var(--ease-out);
+  }
+  .seg-btn:hover {
+    color: var(--text);
+  }
+  .seg-btn.active {
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+
+  /* Ползунок порога: минималистичный трек, акцентный thumb. */
+  .slider input[type="range"] {
+    width: 7rem;
+    height: 2px;
+    appearance: none;
+    -webkit-appearance: none;
+    background: var(--border);
+    border-radius: var(--r-pill);
+    outline: none;
+    cursor: pointer;
+  }
+  .slider input[type="range"]::-webkit-slider-thumb {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: var(--r-pill);
+    background: var(--accent);
+    cursor: pointer;
+  }
+  .slider input[type="range"]::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border: none;
+    border-radius: var(--r-pill);
+    background: var(--accent);
+    cursor: pointer;
+  }
+  .slider .val {
+    min-width: 2.4rem;
+    font-size: 0.76rem;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
   }
 
   .reset {

@@ -10,7 +10,11 @@
    * проксируются наружу колбэками; своей логики IPC нет.
    */
   import { slide } from "svelte/transition";
-  import { CATEGORY_LABEL, CATEGORY_COLOR } from "../three/palette";
+  import {
+    CATEGORY_LABEL,
+    CATEGORY_COLOR,
+    AGGREGATE_COLOR,
+  } from "../three/palette";
   import { formatSize, formatDate } from "../format";
   import type { Category, ScanNode } from "../ipc/contract";
 
@@ -25,6 +29,16 @@
     onClose: () => void;
   }
   let { node, expanded, onReveal, onClose }: Props = $props();
+
+  // Синтетический блок «Прочее»: не файл и не папка — объединённая мелочь.
+  let isAgg = $derived(node.flags.includes("aggregated"));
+  let aggColorHex = "#" + AGGREGATE_COLOR.toString(16).padStart(6, "0");
+  let aggBg = (() => {
+    const r = (AGGREGATE_COLOR >> 16) & 255;
+    const g = (AGGREGATE_COLOR >> 8) & 255;
+    const b = AGGREGATE_COLOR & 255;
+    return (alpha: number) => `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  })();
 
   function getCategoryColor(cat: Category): string {
     const num = CATEGORY_COLOR[cat] ?? 0x8a8f98;
@@ -44,7 +58,24 @@
     <!-- Заголовок: иконка (папка/файл) + имя + кнопка закрытия (только в развёрнутом) -->
     <div class="header">
       <div class="title-group">
-        {#if node.isDir}
+        {#if isAgg}
+          <!-- Иконка-стопка: «много мелких файлов в одном блоке». -->
+          <svg
+            class="node-icon"
+            style="color: {aggColorHex}"
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+            <polyline points="2 17 12 22 22 17"></polyline>
+            <polyline points="2 12 12 17 22 12"></polyline>
+          </svg>
+        {:else if node.isDir}
           <svg
             class="node-icon dir"
             xmlns="http://www.w3.org/2000/svg"
@@ -93,17 +124,28 @@
     <!-- Важное (всегда видно): размер крупно (dot-matrix KPI) + бэдж категории -->
     <div class="row info-row">
       <span class="size">{formatSize(node.size)}</span>
-      <span
-        class="cat-badge"
-        style="background: {getCategoryBg(
-          node.category,
-          0.12,
-        )}; color: {getCategoryColor(
-          node.category,
-        )}; border-color: {getCategoryBg(node.category, 0.3)}"
-      >
-        {CATEGORY_LABEL[node.category]}
-      </span>
+      {#if isAgg}
+        <span
+          class="cat-badge"
+          style="background: {aggBg(
+            0.12,
+          )}; color: {aggColorHex}; border-color: {aggBg(0.3)}"
+        >
+          {node.childCount.toLocaleString("ru")} мелких файлов
+        </span>
+      {:else}
+        <span
+          class="cat-badge"
+          style="background: {getCategoryBg(
+            node.category,
+            0.12,
+          )}; color: {getCategoryColor(
+            node.category,
+          )}; border-color: {getCategoryBg(node.category, 0.3)}"
+        >
+          {CATEGORY_LABEL[node.category]}
+        </span>
+      {/if}
     </div>
 
     <!-- Подробности (только в развёрнутом виде). `in:slide|global` — анимация

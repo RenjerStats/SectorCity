@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use jwalk::WalkDir;
 use tokio_util::sync::CancellationToken;
 
-use crate::ipc::contract::{Category, NodeFlag, ScanNode, ScanProgress};
+use crate::ipc::contract::{AggMode, AggSpec, Category, NodeFlag, ScanNode, ScanProgress};
 
 pub mod snapshot;
 
@@ -85,51 +85,81 @@ impl ScanTree {
         self.by_path.get(path).copied()
     }
 
-    /// Дети уровня `path` с tail-агрегацией и превью на `depth` уровней вниз.
+    /// Дети уровня `path` с агрегацией мелочи и превью на `depth` уровней вниз.
     ///
-    /// Прямые дети сортируются по размеру (убывание); первые `top_n` отдаются как
-    /// есть, хвост сворачивается в синтетический узел «Прочее» честной суммарной
-    /// площади (флаг `Aggregated`). `top_n == 0` — без агрегации, отдать всех.
+    /// Критерий «мелочи» задаёт [`AggSpec`] (относительный по доле объёма папки или
+    /// абсолютный по байтам, см. контракт). Мелкие ФАЙЛЫ сворачиваются в
+    /// синтетический узел «Прочее» честной суммарной площади (флаг `Aggregated`);
+    /// папки никогда не сворачиваются (остаются навигируемыми районами).
     ///
     /// При `depth > 1` каждый дочерний РАЙОН (папка) дополнительно получает превью
     /// своих детей — вложенный treemap ещё на уровень вниз (ТЗ §3, «очертания до
     /// открытия»); рекурсия идёт до `depth == 1`. Наружу уходит «текущий уровень +
     /// превью», уже агрегированный по хвосту на каждом уровне (docs §IPC, §5.7).
-    pub fn level(&self, path: &str, top_n: usize, depth: u32) -> Vec<ScanNode> {
+    pub fn level(&self, path: &str, agg: &AggSpec, depth: u32) -> Vec<ScanNode> {
         let Some(idx) = self.index_of(path) else {
             return Vec::new();
         };
-        self.children_of(idx, top_n, depth)
+        // `current = true` только для запрошенного уровня: абсолютный порог живёт
+        // лишь здесь, превью уходят в относительный фолбэк (см. `is_small`).
+        self.children_of(idx, agg, depth, true)
     }
 
-    /// Дети узла `idx` (top-N + «Прочее»); папки при `depth > 1` несут превью.
-    fn children_of(&self, idx: usize, top_n: usize, depth: u32) -> Vec<ScanNode> {
+    /// Дети узла `idx` (крупные + «Прочее»); папки при `depth > 1` несут превью.
+    /// `current` — это запрошенный уровень (для семантики абсолютного режима).
+    fn children_of(&self, idx: usize, agg: &AggSpec, depth: u32, current: bool) -> Vec<ScanNode> {
+        let parent_size = self.nodes[idx].size;
         let mut kids = self.nodes[idx].children.clone();
         kids.sort_by(|&a, &b| self.nodes[b].size.cmp(&self.nodes[a].size));
 
-        // `top_n == 0` или мало детей → без хвоста; иначе режем на head/tail.
-        let split = if top_n == 0 || kids.len() <= top_n {
-            kids.len()
-        } else {
-            top_n
-        };
-        let (head, tail) = kids.split_at(split);
+        // Папки всегда в head; мелкие файлы и файлы поверх потолка перфо — в tail.
+        let cap = agg.top_n_cap as usize;
+        let mut head: Vec<usize> = Vec::new();
+        let mut tail: Vec<usize> = Vec::new();
+        let mut file_head = 0usize;
+        for &k in &kids {
+            if self.nodes[k].is_dir {
+                head.push(k);
+            } else if self.is_small(k, parent_size, agg, current) || (cap > 0 && file_head >= cap) {
+                tail.push(k);
+            } else {
+                head.push(k);
+                file_head += 1;
+            }
+        }
 
         let mut out: Vec<ScanNode> = head
             .iter()
-            .map(|&k| self.node_with_preview(k, top_n, depth))
+            .map(|&k| self.node_with_preview(k, agg, depth))
             .collect();
         if !tail.is_empty() {
-            out.push(self.aggregate_tail(idx, tail));
+            out.push(self.aggregate_tail(idx, &tail));
         }
         out
     }
 
+    /// Файл `idx` — «мелочь» по текущему [`AggSpec`]? Папки сюда не передаются.
+    /// Относительный режим (и фолбэк превью абсолютного) сравнивает долю объёма
+    /// родителя; абсолютный на запрошенном уровне — точные байты.
+    fn is_small(&self, idx: usize, parent_size: u64, agg: &AggSpec, current: bool) -> bool {
+        let size = self.nodes[idx].size;
+        let relative =
+            || parent_size > 0 && (size as f64) < f64::from(agg.fraction) * parent_size as f64;
+        match agg.mode {
+            AggMode::Relative => relative(),
+            AggMode::Absolute if current => size < agg.min_bytes,
+            // Превью в абсолютном режиме чистятся относительным фолбэком.
+            AggMode::Absolute => relative(),
+        }
+    }
+
     /// Узел `idx` в контракт; при `depth > 1` для непустой папки — с превью детей.
-    fn node_with_preview(&self, idx: usize, top_n: usize, depth: u32) -> ScanNode {
+    fn node_with_preview(&self, idx: usize, agg: &AggSpec, depth: u32) -> ScanNode {
         let mut node = self.to_contract(idx);
         if depth > 1 && self.nodes[idx].is_dir && !self.nodes[idx].children.is_empty() {
-            node.children = self.children_of(idx, top_n, depth - 1);
+            // Превью — не запрошенный уровень (current = false): абсолютный порог
+            // сюда не проникает, действует относительный фолбэк.
+            node.children = self.children_of(idx, agg, depth - 1, false);
         }
         node
     }
@@ -507,6 +537,18 @@ mod tests {
         f.write_all(&vec![0u8; bytes]).unwrap();
     }
 
+    /// Относительный режим без порога (fraction = 0 → ничего не сворачивается),
+    /// `cap` — потолок числа файлов на уровень (0 = без потолка). Удобно для
+    /// тестов раскладки/превью и для воспроизведения старой top-N-агрегации.
+    fn agg(cap: u32) -> AggSpec {
+        AggSpec {
+            mode: AggMode::Relative,
+            fraction: 0.0,
+            min_bytes: 0,
+            top_n_cap: cap,
+        }
+    }
+
     #[test]
     fn aggregates_sizes_bottom_up() {
         let root = temp_dir("agg");
@@ -550,7 +592,7 @@ mod tests {
         let root_path = tree.root_node().path.to_string_lossy().into_owned();
 
         // depth = 1: превью нет даже у папки.
-        let flat = tree.level(&root_path, 0, 1);
+        let flat = tree.level(&root_path, &agg(0), 1);
         let sub_flat = flat
             .iter()
             .find(|n| n.name == "sub")
@@ -561,7 +603,7 @@ mod tests {
         );
 
         // depth = 2: папка sub несёт превью своих детей (b.bin, c.bin); файл a.bin — нет.
-        let nested = tree.level(&root_path, 0, 2);
+        let nested = tree.level(&root_path, &agg(0), 2);
         let sub_nested = nested
             .iter()
             .find(|n| n.name == "sub")
@@ -580,9 +622,9 @@ mod tests {
     }
 
     #[test]
-    fn level_tail_aggregates_into_other() {
+    fn level_cap_aggregates_into_other() {
         let root = temp_dir("tail");
-        // Четыре файла разного размера; top_n = 2 → два крупнейших + «Прочее».
+        // Четыре файла разного размера; потолок cap = 2 → два крупнейших + «Прочее».
         write_file(&root.join("big1.bin"), 100);
         write_file(&root.join("big2.bin"), 80);
         write_file(&root.join("small1.bin"), 10);
@@ -591,7 +633,7 @@ mod tests {
         let tree = scan_root(&root).unwrap();
         let root_path = tree.root_node().path.to_string_lossy().into_owned();
 
-        let level = tree.level(&root_path, 2, 1);
+        let level = tree.level(&root_path, &agg(2), 1);
         assert_eq!(level.len(), 3, "2 крупнейших + «Прочее»");
         assert_eq!(level[0].name, "big1.bin");
         assert_eq!(level[1].name, "big2.bin");
@@ -600,6 +642,89 @@ mod tests {
         assert!(other.flags.contains(&NodeFlag::Aggregated));
         assert_eq!(other.size, 15, "честная сумма хвоста");
         assert_eq!(other.child_count, 2);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn level_relative_threshold_collapses_small_files_only() {
+        let root = temp_dir("relative");
+        // Корень = 1000 байт: один большой файл 900 (90%), мелочь и одна папка.
+        write_file(&root.join("big.bin"), 900);
+        write_file(&root.join("mid.bin"), 60); // 6% — крупнее порога 5%
+        write_file(&root.join("tiny1.bin"), 25); // 2.5% — в «Прочее»
+        write_file(&root.join("tiny2.bin"), 15); // 1.5% — в «Прочее»
+        let sub = root.join("sub"); // папка-кроха никогда не сворачивается
+        fs::create_dir_all(&sub).unwrap();
+
+        let tree = scan_root(&root).unwrap();
+        let root_path = tree.root_node().path.to_string_lossy().into_owned();
+
+        // Порог 5% от объёма папки (0.05), без потолка перфо.
+        let spec = AggSpec {
+            mode: AggMode::Relative,
+            fraction: 0.05,
+            min_bytes: 0,
+            top_n_cap: 0,
+        };
+        let level = tree.level(&root_path, &spec, 1);
+
+        // Видим big, mid, пустую папку sub и «Прочее» (tiny1 + tiny2).
+        assert!(level.iter().any(|n| n.name == "big.bin"));
+        assert!(level.iter().any(|n| n.name == "mid.bin"));
+        assert!(level.iter().any(|n| n.name == "sub" && n.is_dir));
+        assert!(
+            !level.iter().any(|n| n.name == "tiny1.bin"),
+            "мелочь не видна отдельно"
+        );
+
+        let other = level
+            .iter()
+            .find(|n| n.flags.contains(&NodeFlag::Aggregated))
+            .expect("узел «Прочее»");
+        assert_eq!(other.size, 40, "честная сумма tiny1 + tiny2");
+        assert_eq!(other.child_count, 2);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn level_absolute_threshold_only_current_level() {
+        let root = temp_dir("absolute");
+        // root/keep.bin = 500; root/drop.bin = 50; root/sub/inner.bin = 50.
+        // Абсолютный порог 100 байт: на текущем уровне drop.bin сворачивается,
+        // а inner.bin (внутри sub, превью) НЕ должен сворачиваться абсолютным
+        // порогом — иначе у мелкой папки выкосило бы всё.
+        write_file(&root.join("keep.bin"), 500);
+        write_file(&root.join("drop.bin"), 50);
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        write_file(&sub.join("inner.bin"), 50);
+
+        let tree = scan_root(&root).unwrap();
+        let root_path = tree.root_node().path.to_string_lossy().into_owned();
+
+        let spec = AggSpec {
+            mode: AggMode::Absolute,
+            fraction: 0.0, // относительный фолбэк превью выключен → inner виден
+            min_bytes: 100,
+            top_n_cap: 0,
+        };
+        let level = tree.level(&root_path, &spec, 2);
+
+        // Текущий уровень: keep.bin виден, drop.bin (50 < 100) → «Прочее».
+        assert!(level.iter().any(|n| n.name == "keep.bin"));
+        assert!(!level.iter().any(|n| n.name == "drop.bin"));
+        assert!(level
+            .iter()
+            .any(|n| n.flags.contains(&NodeFlag::Aggregated)));
+
+        // Превью sub: inner.bin (50 байт) виден, абсолютный порог сюда не дошёл.
+        let sub_node = level.iter().find(|n| n.name == "sub").expect("узел sub");
+        assert!(
+            sub_node.children.iter().any(|c| c.name == "inner.bin"),
+            "абсолютный порог не должен сворачивать содержимое дочерней папки"
+        );
 
         fs::remove_dir_all(&root).ok();
     }

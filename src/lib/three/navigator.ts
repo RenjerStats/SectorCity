@@ -52,6 +52,13 @@ export function isInteractive(content: Group): boolean {
 export interface CityNavigator {
   /** Сбросить мир к единственному активному уровню (старт/после скана/прыжок). */
   reset(nodes: ScanNode[], path: string): void;
+  /**
+   * Пересобрать активный уровень новыми `nodes` НА МЕСТЕ: тот же путь и span,
+   * камера и декор-родитель не трогаются (смена порога агрегатора — это перерас-
+   * кладка текущего уровня, а не навигация). `nodes` должны быть детьми того же
+   * активного пути. Если активного уровня нет — no-op.
+   */
+  rebuildActive(nodes: ScanNode[]): void;
   /** Бесшовный drill в район `node`; `childNodes` = `get_level(node.path)`. */
   drill(node: ScanNode, childNodes: ScanNode[], ms: number): Promise<void>;
   /** Можно ли бесшовно подняться к `parentPath` (это текущий декор-родитель). */
@@ -100,6 +107,19 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     setActiveView(active);
     setInteractive(true);
     handle.placeCamera(INITIAL_CAMERA_POS, INITIAL_TARGET);
+  }
+
+  function rebuildActive(nodes: ScanNode[]): void {
+    if (!active) return;
+    const { path, span } = active;
+    // Активный уровень всегда в identity (origin shift), поэтому пересборка с тем
+    // же span сохраняет геометрию под камерой; декор-родитель остаётся как есть
+    // (его превью данного района и так скрыто, см. drill → setDecor).
+    disposeLevel(active);
+    active = buildLevel(nodes, span, path);
+    content.add(active.group);
+    active.setHighlight(currentMatch); // подсветка переживает пересборку
+    setActiveView(active);
   }
 
   async function drill(
@@ -207,5 +227,14 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     setInteractive(false);
   }
 
-  return { reset, drill, canUp, up, updateLOD, applyHighlight, dispose };
+  return {
+    reset,
+    rebuildActive,
+    drill,
+    canUp,
+    up,
+    updateLOD,
+    applyHighlight,
+    dispose,
+  };
 }

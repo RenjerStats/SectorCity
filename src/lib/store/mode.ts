@@ -8,7 +8,7 @@
  * (позиция оверлея покадрово) пишется в DOM императивно, в обход стора.
  */
 import { atom, computed } from "nanostores";
-import type { NodeId, ScanNode, ScanProgress } from "../ipc/contract";
+import type { AggMode, NodeId, ScanNode, ScanProgress } from "../ipc/contract";
 
 export type AppMode =
   | { kind: "scanning"; progress: number }
@@ -83,6 +83,31 @@ export const filterActive = computed(
   candidateFilter,
   (f) => f.onlyCandidates || f.minSize > 0 || f.olderThanDays > 0,
 );
+
+/**
+ * Настройки агрегатора мелочи (блок «Прочее»). СТРУКТУРНО меняют, что свёрнуто
+ * (в отличие от фильтра-подсветки, который ничего не убирает). При изменении
+ * `Scene` перезапрашивает текущий уровень и пересобирает город (с debounce).
+ *
+ * - `relative` (по умолчанию): `fraction` — доля объёма папки; применяется на
+ *   каждом уровне рекурсивно (см. контракт `AggSpec`).
+ * - `absolute`: `minBytes` — точный порог; только текущий уровень, превью —
+ *   относительный фолбэк по `fraction`.
+ */
+export interface AggSettings {
+  mode: AggMode;
+  /** Доля объёма папки 0.01–0.10 (ползунок 1–10%). */
+  fraction: number;
+  /** Порог абсолютного режима, байты. */
+  minBytes: number;
+}
+
+/** Порог по умолчанию: относительный, 1% от объёма папки (сворачивает лишь кроху). */
+export const aggSettings = atom<AggSettings>({
+  mode: "relative",
+  fraction: 0.01,
+  minBytes: 1024 * 1024, // 1 МБ — стартовое значение абсолютного режима
+});
 
 /**
  * Поисковый запрос (подсветка по имени, фаза 2 «сцена в тень, совпадения светятся»).
