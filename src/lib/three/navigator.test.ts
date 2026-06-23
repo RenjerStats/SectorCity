@@ -1,10 +1,10 @@
 /**
  * Тесты бесшовной навигации (`navigator.ts`): drill/up + rebase (origin shift).
  *
- * Это ГЛАВНЫЙ регресс-тест бага «после drill LOD намертво ломается»: проверяем,
- * что у активного уровня ПОСЛЕ drill LOD снова реагирует на камеру (далёкая —
- * силуэты, близкая — вложенные здания). Раньше декор накрывал активный уровень и
- * LOD «висел».
+ * Регресс-тест бага «после drill вся папка — один блок»: проверяем, что у
+ * активного уровня ПОСЛЕ drill видна вложенная застройка (раньше декор накрывал
+ * активный уровень). Детализация теперь задаётся ГЛУБИНОЙ, а не расстоянием
+ * (vision §II.3.2): купола +1 и их домики видны при любой позиции камеры.
  *
  * Сцена не нужна (WebGL/DOM): `navigator` зависит от `SceneHandle` только по типу
  * (`import type`) и каноническая поза вынесена в `home.ts`. Подсовываем фейковую
@@ -65,7 +65,7 @@ function buildingsVisibleAt(
   nav.updateLOD();
   const view = activeView(handle.content);
   expect(view).not.toBeNull();
-  return visibleCount(view!.pickMeshes()[0]); // [building, plot, coarse]
+  return visibleCount(view!.pickMeshes()[0]); // [building, dome]
 }
 
 const FAR = new Vector3(0, 5000, 5000);
@@ -98,7 +98,7 @@ describe("createNavigator: reset / drill / up", () => {
     nav.dispose();
   });
 
-  it("РЕГРЕССИЯ: после drill LOD активного уровня снова работает", async () => {
+  it("РЕГРЕССИЯ: после drill активный уровень показывает вложенную застройку", async () => {
     const handle = fakeHandle();
     const nav = createNavigator(handle);
     nav.reset(tree(), "root");
@@ -106,10 +106,12 @@ describe("createNavigator: reset / drill / up", () => {
     const nodeA = tree()[0];
     await nav.drill(nodeA, nodeA.children!, 0);
 
-    // Далёкая камера — вложенных зданий не видно (только силуэты под-районов).
-    expect(buildingsVisibleAt(handle, nav, FAR)).toBe(0);
-    // Близкая камера — под-районы раскрылись во вложенные здания (LOD ожил).
-    expect(buildingsVisibleAt(handle, nav, NEAR_ORIGIN)).toBeGreaterThan(0);
+    // Купола +1 (/a/x, /a/y) и их домики видны при ЛЮБОЙ позиции камеры —
+    // детализация по глубине, не по расстоянию (vision §II.3.2).
+    const far = buildingsVisibleAt(handle, nav, FAR);
+    const near = buildingsVisibleAt(handle, nav, NEAR_ORIGIN);
+    expect(far).toBeGreaterThan(0);
+    expect(near).toBe(far); // облик не «дышит» от движения камеры
 
     nav.dispose();
   });

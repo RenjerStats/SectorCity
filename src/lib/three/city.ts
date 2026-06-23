@@ -1,27 +1,34 @@
 /**
- * Построение «города» одного уровня как самостоятельной `Group` (фаза 2:
- * вложенный treemap + LOD + бесшовная навигация).
+ * Построение «города» одного уровня как самостоятельной `Group` (vision §II.3:
+ * папки — стеклянные купола, детализация по глубине вместо дистанционного LOD).
  *
  * Уровень строится КАНОНИЧЕСКИ: squarified-treemap (`d3-hierarchy`) в прямо-
  * угольнике аспекта своего владельца (нормированном так, что бо́льшая сторона =
  * `CITY_SPAN`), сцентрированный около начала координат. Так как squarify
- * scale-инвариантен (раскладка зависит от аспекта и размеров детей, не от
- * абсолютного размера), превью района = равномерно уменьшенная копия этого же
+ * scale-инвариантен, превью района = равномерно уменьшенная копия этого же
  * района «как самостоятельного уровня». Это и делает drill дешёвым: размещение
  * уровня в прямоугольник района — честная similarity `G(local)=s·local+C`
- * (см. `navigator.ts`), а промоут «превью → активный» — пиксель-в-пиксель.
+ * (см. `navigator.ts`), а промоут «купол → активный уровень» — пиксель-в-пиксель
+ * по домикам (анимируется только снятие стекла, §II.3.6).
  *
  * Координаты d3 → мир — ТОЛЬКО через `layoutToWorld` (docs §5.6).
  *
- * Рендер разводит сущности (docs §5, backlog фаза 2):
+ * Сущности рендера (vision §II.3):
  *   - «здание» = файл/лист: высота=устаревание (mtime), цвет=категория;
- *   - «район-плот» = папка: тонкая плита + вложенные здания вблизи, либо грубый
- *     силуэт-блок издалека (LOD).
+ *   - «папка» = купол: полуматовый стеклянный `RoundedBox` (нейтральный, монохром)
+ *     + металлический ободок-основание. Внутри — реальная застройка (на глубине
+ *     +1) либо четыре серых куба-заглушки (на глубине +2, купол-«теплица»).
  *
- * Высоты вложенных превью масштабируются footprint-scale района
- * (`s_D = max(w,d)/CITY_SPAN`): при промоуте в активный уровень (который строится
- * с полными высотами и ставится трансформом `s_D`) превью и активный совпадают,
- * «иголок» из рассогласования масштабов высоты и основания нет.
+ * Детализация по ГЛУБИНЕ, не по расстоянию до камеры (§II.3.2 — заменяет прежний
+ * гистерезис `NEAR_ENTER`/`NEAR_EXIT`): прямые дети текущей папки (+1) — полно-
+ * ценные купола с настоящими домиками; папки внутри них (+2) — купола-заглушки с
+ * серыми кубами. Облик папки не «дышит» от движения камеры — предсказуемее и
+ * точнее ложится на метафору «обособленный контейнер». `updateLOD` поэтому пуст
+ * (оставлен для совместимости API: навигатор/тесты зовут его покадрово).
+ *
+ * Высоты вложенных превью (+1) масштабируются footprint-scale района
+ * (`s_D = max(w,d)/CITY_SPAN`): при промоуте в активный уровень превью и активный
+ * совпадают по высотам, «иголок» из рассогласования масштабов нет.
  *
  * Контакт с DOM — нет: это императивный 3D-слой. Уровнями владеет `navigator.ts`.
  */
@@ -38,18 +45,24 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
+  MeshPhysicalMaterial,
+  MeshStandardMaterial,
   Object3D,
   PlaneGeometry,
   Vector3,
 } from "three";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { hierarchy, treemap, treemapSquarify } from "d3-hierarchy";
 import type { ScanNode } from "../ipc/contract";
 import {
   AGGREGATE_COLOR,
   CATEGORY_COLOR,
   CLEANUP_MARK_COLOR,
-  DISTRICT_PLOT_COLOR,
+  DOME_RING_COLOR,
+  GLASS_COLOR,
+  GLASS_ROUGHNESS,
   GROUND_COLOR,
+  STUB_COLOR,
 } from "./palette";
 import { layoutToWorld, type TreemapRect } from "./layoutToWorld";
 
@@ -58,7 +71,7 @@ export const CITY_SPAN = 200;
 /**
  * Зазор-«дорога» МЕЖДУ районами (широкий) и зазор между домами ВНУТРИ района
  * (плотный). Депт-зависимый padding: дороги читаются как разметка, а застройка
- * внутри района остаётся плотной (vision §II.3). Дорога должна вмещать ~2 шага
+ * внутри купола остаётся плотной (vision §II.3.4). Дорога должна вмещать ~2 шага
  * dot-grid (`ROAD_DOT_CELL`), иначе сетка выглядит как набор точек, а не улица.
  */
 const ROAD_WIDTH = 9;
@@ -79,8 +92,13 @@ const GROUND_APRON = 3; // во сколько раз земля больше г
 const GROUND_EDGE_COLOR = 0x080808; // = --bg: к нему гаснут земля и сетка у краёв
 const APRON_STEP = 6; // шаг сетки-поля вокруг города
 const APRON_DOT_ALPHA = 0.12; // базовая яркость точки поля (до угасания)
-/** Внешний отступ детей от рамки района — читаемая граница плота. */
-const DISTRICT_PAD = 1.0;
+/**
+ * Внешний отступ детей от рамки района. Должен быть БОЛЬШЕ `DOME_FOOTPRINT_INSET`:
+ * разница = зазор между застройкой и стеклом купола. Без зазора домики у самой
+ * стенки не размываются (transmission блюрит по экранному смещению ≈ глубине за
+ * стеклом) и могут «протыкать» стекло, ломая буфер глубины (vision §II.3.7).
+ */
+const DISTRICT_PAD = 3.0;
 /** Верхняя полоса района (рамка/«крыша») сверх внешнего отступа. */
 const DISTRICT_PAD_TOP = 2.5;
 /** Диапазон высоты здания (устаревание), мировые единицы. */
@@ -90,14 +108,33 @@ const MAX_HEIGHT = 70;
 const MAX_AGE_SECONDS = 3 * 365 * 24 * 3600; // ~3 года
 /** Минимальное значение площади, чтобы нулевые узлы не вырождались в точку. */
 const MIN_VALUE = 1;
-/** Высота плиты-плота района (тонкая подложка под вложенные здания). */
-const PLOT_HEIGHT = 2;
 /** Множитель затемнения несовпадающих с фильтром/поиском узлов (подсветка). */
 export const DIM_FACTOR = 0.12;
 
-/** Дистанции LOD камера→центр района (гистерезис против мерцания на границе). */
-const NEAR_ENTER = 130; // ближе этого — район раскрывается во вложенные здания
-const NEAR_EXIT = 170; // дальше этого — сворачивается обратно в силуэт
+/** Высота металлического ободка-основания купола (тонкий постамент), мир. */
+const RING_HEIGHT = 2.2;
+/** Вынос ободка наружу за грань купола — «поребрик» выступает из-под стекла. */
+const RING_RIM = 1.0;
+/**
+ * Купол охватывает свою застройку с запасом-«воздухом» сверху (§II.3.5: высота
+ * самого купола — производная, величину НЕ кодирует). Footprint купола слегка
+ * утоплен внутрь рамки района, чтобы металлический ободок выступал «поребриком».
+ */
+const DOME_AIR = 8; // запас над самым высоким домиком (зазор «застройка↔стекло»)
+const DOME_MIN_HEIGHT = 9; // минимальная высота купола (тощие папки читаемы)
+const DOME_FOOTPRINT_INSET = 0.8; // насколько footprint купола уже рамки района
+/** Скруглённый стеклянный куб: радиус скругления и сегменты на единичном боксе. */
+const DOME_ROUND_RADIUS = 0.06;
+const DOME_ROUND_SEGMENTS = 3;
+
+/** «Теплица» на +2: серые кубы-заглушки (без своей стеклянной оболочки). */
+const STUB_CANON_HEIGHT = 12; // высота серого куба-заглушки (до footprint-scale)
+/** Относительные высоты четырёх кубов — «четыре разных серых куба» (§II.3.2). */
+const STUB_HEIGHT_RATIOS = [1.0, 0.7, 0.85, 0.55];
+const STUB_GAP = 0.18; // доля зазора между кубами в footprint теплицы
+
+/** Притушенный серый материал декора (контекст-родитель). */
+const DECOR_GRAY = 0.35;
 
 /** Прямоугольник-владелец уровня (мировые единицы), задаёт аспект раскладки. */
 export interface LevelSpan {
@@ -127,17 +164,20 @@ interface TreeDatum {
 export interface PickInfo {
   /** Узел под курсором (для тултипа/обводки). */
   node: ScanNode;
-  /** Цель drill при клике (для вложенного превью — родительский район). */
+  /** Цель drill при клике (для вложенного содержимого — родительский район). */
   drillTarget: ScanNode;
 }
 
 /**
- * Текущий город уровня (мост для пикинга и LOD). DOM сюда не заглядывает.
+ * Текущий город уровня (мост для пикинга). DOM сюда не заглядывает.
  */
 export interface CityView {
-  /** Покадрово: пересчитать LOD районов по позиции камеры (дёшево, см. §LOD). */
+  /**
+   * Покадровый хук (оставлен для совместимости API). Детализация задаётся ГЛУБИНОЙ,
+   * не расстоянием (§II.3.2), поэтому здесь делать нечего — облик статичен.
+   */
   updateLOD(camera: Camera): void;
-  /** Меши, по которым идёт raycast (здания + плоты + силуэты); маркеры исключены. */
+  /** Меши, по которым идёт raycast (купола-папки + здания-файлы). */
   pickMeshes(): InstancedMesh[];
   /** Разрешить попадание (меш+инстанс) в узел/цель-drill, либо `null`. */
   resolvePick(mesh: Object3D, instanceId: number): PickInfo | null;
@@ -147,7 +187,7 @@ export interface CityView {
  * Уровень города — самостоятельная `Group` с канонической раскладкой. Размещение
  * в мир (в прямоугольник района родителя) задаётся трансформом группы извне
  * (`navigator.ts`). Активный уровень рисуется полностью и кликабелен; декор —
- * грубые силуэты, притушен, без пикинга (`setDecor`).
+ * притушен, без пикинга (`setDecor`).
  */
 export interface Level {
   /** Контейнер уровня; навигатор задаёт его scale/position (similarity). */
@@ -157,25 +197,24 @@ export interface Level {
   /** Прямоугольник, в котором построен уровень — чтобы пересобрать его на месте
    *  (смена порога агрегатора) с тем же масштабом, не трогая камеру. */
   readonly span: LevelSpan;
-  /** Мост пикинга/LOD активного уровня. */
+  /** Мост пикинга активного уровня. */
   readonly view: CityView;
   /** Размещение дочернего района по пути (канонический фрейм уровня), либо `null`. */
   childPlacement(path: string): Placement | null;
   /**
-   * Переключить облик: декор (силуэты, притушено, без пикинга). `excludePath` —
-   * район, ставший активным уровнем: его силуэт ОБЯЗАТЕЛЬНО скрываем, иначе после
-   * `G⁻¹` он раздувается до `CITY_SPAN` в начале координат и накрывает активный
+   * Переключить облик: декор (притушено, без пикинга). `excludePath` — район,
+   * ставший активным уровнем: его купол и вся застройка ОБЯЗАТЕЛЬНО скрываются,
+   * иначе после `G⁻¹` они раздуваются в начало координат и накрывают активный
    * уровень (был баг «после drill вся папка — один блок»).
    */
   setDecor(excludePath?: string): void;
-  /** Переключить облик: активный (полный рендер + LOD + пикинг). */
+  /** Переключить облик: активный (полный рендер + пикинг). */
   setActive(): void;
   /**
-   * Подсветка-фильтр (фаза 2, DoD «кандидаты одним взглядом»): несовпадающие с
-   * предикатом узлы гасятся домножением per-instance цвета на `DIM_FACTOR`,
-   * совпадающие остаются в полном цвете → «сцена в тень, совпадения светятся».
-   * `null` — снять подсветку (вернуть базовые цвета). Канал цвета не подменяется,
-   * только притеняется (палитра категорий сохраняется).
+   * Подсветка-фильтр (vision §I.4б): несовпадающие с предикатом узлы гасятся
+   * домножением per-instance цвета на `DIM_FACTOR`, совпадающие остаются в полном
+   * цвете → «сцена в тень, совпадения светятся». `null` — снять подсветку. Канал
+   * цвета не подменяется, только притеняется (палитра категорий сохраняется).
    */
   setHighlight(match: ((node: ScanNode) => boolean) | null): void;
   /**
@@ -195,23 +234,19 @@ export interface Level {
   dispose(): void;
 }
 
-/** LOD-группа района: id инстансов и текущее состояние «вблизи». */
-interface DistrictLod {
-  center: Vector3;
-  coarseId: number;
-  plotId: number;
-  buildingIds: number[];
-  near: boolean;
-}
-
-/** Накопитель района при раскладке (до постройки мешей). */
+/** Накопитель купола-района при раскладке (до постройки мешей). */
 interface DistrictAcc {
   node: ScanNode;
   rect: TreemapRect;
-  coarseHeight: number;
   center: Vector3;
   /** footprint-scale района: max(w,d)/CITY_SPAN (масштаб вложенных высот). */
   footprintScale: number;
+  /** Глубина относительно текущей папки: 1 (+1, реальные домики) или 2 (+2, заглушка). */
+  depth: 1 | 2;
+  /** Для +2: индекс родительского +1-купола в `districts` (для исключения в декоре). */
+  parentIdx: number | null;
+  /** Самый высокий внутренний элемент (домик/купол-теплица) — высота купола = он + воздух. */
+  maxChildHeight: number;
 }
 
 /** Накопитель здания при раскладке. */
@@ -219,29 +254,38 @@ interface BuildingAcc {
   node: ScanNode;
   rect: TreemapRect;
   height: number;
-  /** Индекс района-владельца в `districts` (вложенное превью), либо `null`. */
+  /** Индекс +1-купола-владельца в `districts` (вложенный домик), либо `null` (файл верхнего уровня). */
   districtIdx: number | null;
+}
+
+/** Контейнер = папка ИЛИ блок-агрегат «Мелочь» (навигируемый купол). */
+function isContainer(node: ScanNode): boolean {
+  return node.isDir || node.flags.includes("aggregated");
 }
 
 /**
  * Вложенная squarified-раскладка уровня в прямоугольнике `span` (аспект владельца,
  * нормированный к CITY_SPAN). Строит настоящую d3-иерархию из `ScanNode.children`
- * (превью), возвращает накопители районов и зданий с прямоугольниками в координатах
- * раскладки (y вниз), сцентрированными около начала координат. Высоты вложенных
- * (depth 2) зданий масштабируются footprint-scale района (см. шапку файла).
+ * (превью), классифицирует узлы по глубине и возвращает накопители куполов и
+ * зданий с прямоугольниками в координатах раскладки (y вниз), сцентрированными
+ * около начала координат.
  */
 function layoutNested(
   nodes: ScanNode[],
   span: LevelSpan,
   nowSeconds: number,
 ): { districts: DistrictAcc[]; buildings: BuildingAcc[] } {
-  const toDatum = (node: ScanNode): TreeDatum => {
+  // Раскладку обрезаем на глубине +2: прямые дети (+1) несут свою застройку, а
+  // папки внутри них (+2) становятся листьями-«теплицами» (стекло + серые кубы),
+  // их реальных детей в раскладку НЕ тянем (§II.3.2). `depth`: дети текущей папки
+  // приходят как 1, их дети — 2; глубже не идём.
+  const toDatum = (node: ScanNode, depth: number): TreeDatum => {
     const kids = node.children;
-    return kids && kids.length > 0
-      ? { node, children: kids.map(toDatum) }
+    return kids && kids.length > 0 && depth < 2
+      ? { node, children: kids.map((k) => toDatum(k, depth + 1)) }
       : { node };
   };
-  const rootDatum: TreeDatum = { children: nodes.map(toDatum) };
+  const rootDatum: TreeDatum = { children: nodes.map((n) => toDatum(n, 1)) };
 
   const root = hierarchy<TreeDatum>(rootDatum, (d) => d.children).sum((d) =>
     // Значение только у листьев; d3 сворачивает площади районов вверх сам.
@@ -255,8 +299,7 @@ function layoutNested(
     .tile(treemapSquarify)
     .size([span.w, span.d])
     // Депт-зависимый зазор: корень (между районами) — широкая дорога; район
-    // (между его домами) — плотная застройка. paddingInner(node) оценивается на
-    // РОДИТЕЛЕ и разделяет его детей.
+    // (между его домами) — плотная застройка.
     .paddingInner((node) => (node.depth === 0 ? ROAD_WIDTH : BUILDING_GAP))
     .paddingOuter(DISTRICT_PAD)
     .paddingTop(DISTRICT_PAD_TOP)(root);
@@ -274,28 +317,61 @@ function layoutNested(
   const buildings: BuildingAcc[] = [];
   const districtIdxByNode = new Map<ScanNode, number>();
 
-  // descendants(): pre-order (родитель раньше детей) — район заводим до его
-  // вложенных зданий, чтобы те нашли индекс владельца и его footprint-scale.
+  // descendants(): pre-order (родитель раньше детей) — купол заводим до его
+  // вложенного содержимого, чтобы те нашли индекс владельца и его footprint-scale.
   for (const d of laidOut.descendants()) {
     const node = d.data.node;
     if (!node) continue; // синтетический корень
     const rect = center(d);
 
-    const isDistrict = d.depth === 1 && !!d.children && d.children.length > 0;
-    if (isDistrict) {
+    if (d.depth === 1 && isContainer(node)) {
+      // +1 купол: прямой ребёнок текущей папки → полноценная застройка внутри.
       const c = layoutToWorld(rect, 0);
       const idx = districts.length;
       districtIdxByNode.set(node, idx);
-      const footprintScale = Math.max(c.width, c.depth) / CITY_SPAN;
       districts.push({
         node,
         rect,
-        coarseHeight: heightFromMtime(node.mtime, nowSeconds),
         center: new Vector3(c.centerX, 0, c.centerZ),
-        footprintScale,
+        footprintScale: Math.max(c.width, c.depth) / CITY_SPAN,
+        depth: 1,
+        parentIdx: null,
+        maxChildHeight: 0,
       });
+    } else if (d.depth === 2 && isContainer(node)) {
+      // +2 «теплица»: папка внутри папки → только серые кубы-заглушки (без своей
+      // стеклянной оболочки — иначе она рендерилась бы поверх стекла родителя
+      // чётко). Высота кубов фиксирована под scale; они под «крышей» родителя.
+      const c = layoutToWorld(rect, 0);
+      const parentIdx =
+        d.ancestors().reduce<number | null>((acc, a) => {
+          if (acc !== null) return acc;
+          const an = a.data.node;
+          return an && a.depth === 1
+            ? (districtIdxByNode.get(an) ?? null)
+            : acc;
+        }, null) ?? null;
+      const parentScale =
+        parentIdx !== null ? districts[parentIdx].footprintScale : 1;
+      const stubH = STUB_CANON_HEIGHT * parentScale; // самый высокий куб-заглушка
+      districts.push({
+        node,
+        rect,
+        center: new Vector3(c.centerX, 0, c.centerZ),
+        footprintScale: Math.max(c.width, c.depth) / CITY_SPAN,
+        depth: 2,
+        parentIdx,
+        maxChildHeight: stubH,
+      });
+      // Кубы-заглушки должны помещаться под «крышей» родительского +1 купола.
+      if (parentIdx !== null) {
+        districts[parentIdx].maxChildHeight = Math.max(
+          districts[parentIdx].maxChildHeight,
+          stubH,
+        );
+      }
     } else {
-      // Лист: здание верхнего уровня (depth 1) или вложенное превью (depth 2).
+      // Лист-файл: здание верхнего уровня (+0) или вложенный домик (+1, внутри купола).
       let districtIdx: number | null = null;
       let scale = 1;
       if (d.depth === 2) {
@@ -303,16 +379,23 @@ function layoutNested(
         districtIdx = (ancestor && districtIdxByNode.get(ancestor)) ?? null;
         if (districtIdx !== null) scale = districts[districtIdx].footprintScale;
       }
-      buildings.push({
-        node,
-        rect,
-        height: heightFromMtime(node.mtime, nowSeconds) * scale,
-        districtIdx,
-      });
+      const height = heightFromMtime(node.mtime, nowSeconds) * scale;
+      buildings.push({ node, rect, height, districtIdx });
+      if (districtIdx !== null) {
+        districts[districtIdx].maxChildHeight = Math.max(
+          districts[districtIdx].maxChildHeight,
+          height,
+        );
+      }
     }
   }
 
   return { districts, buildings };
+}
+
+/** Высота купола из самого высокого внутреннего элемента + запас-«воздух». */
+function domeHeight(d: DistrictAcc): number {
+  return Math.max(DOME_MIN_HEIGHT, d.maxChildHeight + DOME_AIR);
 }
 
 /** Высота из устаревания: чем старше mtime, тем выше (канал «устаревание»). */
@@ -326,37 +409,34 @@ function heightFromMtime(mtime: number, nowSeconds: number): number {
 const ZERO_MATRIX = new Matrix4().makeScale(0, 0, 0);
 
 /**
- * Базовый цвет здания. Папка-превью → структурный тинт плота; синтетический блок
- * «Прочее» (флаг `aggregated`) → собственный цвет-агрегата (не из категорийной
- * палитры — чтобы не путать с папкой/категорией); иначе — цвет категории. Канал
- * цвета остаётся за категорией; агрегат намеренно выделен отдельным тоном.
+ * Базовый цвет здания-файла. Синтетический блок «Мелочь» (флаг `aggregated`) →
+ * собственный цвет-агрегата (не из категорийной палитры — чтобы не путать с
+ * папкой/категорией); иначе — цвет категории.
  */
 function baseBuildingColor(node: ScanNode): number {
-  if (node.isDir) return DISTRICT_PLOT_COLOR;
   if (node.flags.includes("aggregated")) return AGGREGATE_COLOR;
   return CATEGORY_COLOR[node.category];
 }
 
 /**
- * Базовый цвет района (плот + силуэт). Обычная папка → нейтральный тинт-плот;
- * синтетический блок «Прочее» (флаг `aggregated`) стал размещённым кварталом —
- * сохраняет собственный цвет-агрегат, чтобы читаться как «объединённая мелочь»,
- * а не как обычная папка. Плот/силуэт держат цвет per-instance (material — белый),
- * как и здания: так подсветка-фильтр может притенять отдельные районы.
+ * Базовый цвет металлического ободка-основания купола. Обычная папка → нейтральный
+ * металл; блок «Мелочь» (`aggregated`) несёт цвет-агрегат, чтобы читаться как
+ * «объединённая мелочь», а не обычная папка. Стекло купола всегда нейтрально
+ * (§II.3.5) — категорийный тинт допустим только здесь, на основании.
  */
-function districtBaseColor(node: ScanNode): number {
-  return node.flags.includes("aggregated")
-    ? AGGREGATE_COLOR
-    : DISTRICT_PLOT_COLOR;
+function ringBaseColor(node: ScanNode): number {
+  return node.flags.includes("aggregated") ? AGGREGATE_COLOR : DOME_RING_COLOR;
 }
 
 /**
  * Построить уровень `nodes` в собственной `Group` (канонически, в прямоугольнике
  * `span`). Группа создаётся в identity — размещение в мир задаёт навигатор.
  *
- * Уровень рисуется тремя `InstancedMesh`: здания (файлы + вложенные превью),
- * плиты-плоты районов и грубые силуэты районов. LOD прячет/показывает их группами
- * по дистанции (см. `CityView.updateLOD`).
+ * Меши уровня:
+ *   - `buildingMesh` — файлы (верхнего уровня + вложенные домики +1);
+ *   - `domeMesh`     — стеклянные купола папок (прозрачный проход, §II.3.7);
+ *   - `ringMesh`     — металлические ободки-основания куполов;
+ *   - `stubMesh`     — серые кубы-заглушки в куполах-теплицах +2.
  */
 export function buildLevel(
   nodes: ScanNode[],
@@ -369,9 +449,7 @@ export function buildLevel(
   const { districts, buildings } = layoutNested(nodes, span, nowSeconds);
 
   // Земля — большой матовый «апрон» вокруг города с радиальным угасанием цвета к
-  // краям (город не висит в вакууме). Дороги — отдельный слой точек-«бордюров»
-  // вокруг блоков + поле-сетка на апроне; оба строятся ПОСЛЕ раскладки, т.к.
-  // нужны прямоугольники блоков. В декоре оба прячутся (см. applyDecor).
+  // краям. Дороги — отдельный слой точек-«бордюров» вокруг блоков + поле-сетка.
   const ground = makeFadedGround(span);
   group.add(ground);
   const roadDots = buildRoadDots(span, districts, buildings);
@@ -380,27 +458,15 @@ export function buildLevel(
   const dummy = new Object3D();
   const color = new Color();
 
-  // Карта «путь района → размещение» для drill/up (childPlacement) и «путь →
-  // индекс инстанса района» (для скрытия силуэта района, ставшего активным).
+  // Карта «путь района → размещение» (для drill/up) и «путь → индекс купола»
+  // (для исключения купола, ставшего активным уровнем, в декоре).
   const placements = new Map<string, Placement>();
   const districtIndexByPath = new Map<string, number>();
 
-  // --- Здания: файлы верхнего уровня (видны всегда) + вложенные превью (видны
-  // только когда район «вблизи»). Реальные матрицы храним для LOD-восстановления.
+  // --- Здания: файлы верхнего уровня + вложенные домики (+1, внутри куполов).
   const buildingPick: (PickInfo | null)[] = [];
   let buildingMesh: InstancedMesh | null = null;
   const buildingReal: Matrix4[] = [];
-  const lod: DistrictLod[] = districts.map((d) => ({
-    center: d.center,
-    coarseId: -1,
-    plotId: -1,
-    buildingIds: [],
-    near: false,
-  }));
-  lod.forEach((l, j) => {
-    l.coarseId = j;
-    l.plotId = j;
-  });
 
   if (buildings.length > 0) {
     buildingMesh = new InstancedMesh(
@@ -414,14 +480,11 @@ export function buildLevel(
       dummy.scale.set(box.width, box.height, box.depth);
       dummy.updateMatrix();
       buildingReal[i] = dummy.matrix.clone();
-
-      // Вложенные превью стартуют скрытыми (район далёкий → силуэт); файлы видны.
-      const hidden = b.districtIdx !== null;
-      buildingMesh!.setMatrixAt(i, hidden ? ZERO_MATRIX : dummy.matrix);
+      buildingMesh!.setMatrixAt(i, dummy.matrix);
       buildingMesh!.setColorAt(i, color.set(baseBuildingColor(b.node)));
 
-      if (b.districtIdx !== null) lod[b.districtIdx].buildingIds.push(i);
-
+      // Внутри +1-купола клик ведёт в РОДИТЕЛЬСКИЙ район (как и клик по самому
+      // куполу); файл верхнего уровня — это select (drillTarget = он сам, не папка).
       const drillTarget =
         b.districtIdx !== null ? districts[b.districtIdx].node : b.node;
       buildingPick[i] = { node: b.node, drillTarget };
@@ -432,228 +495,235 @@ export function buildLevel(
     group.add(buildingMesh);
   }
 
-  // --- Плоты и силуэты районов. Один общий материал-тинт (канал цвета — за
-  // категорией зданий, район нейтрален). Плот стартует скрытым, силуэт — видимым.
+  // --- Купола (+1, стекло) + ободки (металл). На +2 (теплицы) отдельной СТЕКЛЯННОЙ
+  // оболочки НЕТ: прозрачный объект не попадает в буфер, который сэмплит
+  // `transmission`, и потому рендерился бы поверх стекла родителя ЧЁТКО (а его
+  // дешёвый материал ничего не размывает). +2 представлен только НЕПРОЗРАЧНЫМИ
+  // серыми кубами — они попадают в буфер и размываются стеклом родительского +1
+  // купола (а +2 всегда внутри +1). Так заглушки «теплицы» читаются так же мутно,
+  // как и файлы внутри купола. domeMesh индексируется районом `j`; инстансы +2
+  // вырождены (ZERO_MATRIX), пикинг +2 идёт через объемлющий купол +1.
   const districtPick: (PickInfo | null)[] = [];
-  let plotMesh: InstancedMesh | null = null;
-  let coarseMesh: InstancedMesh | null = null;
-  const plotReal: Matrix4[] = [];
-  const coarseReal: Matrix4[] = [];
+  let domeMesh: InstancedMesh | null = null;
+  let ringMesh: InstancedMesh | null = null;
+  const domeReal: Matrix4[] = [];
+  const ringReal: Matrix4[] = [];
+
+  // --- Кубы-заглушки куполов-теплиц (+2): 4 на купол; запоминаем их район.
+  interface StubAcc {
+    matrix: Matrix4;
+    districtIdx: number;
+  }
+  const stubs: StubAcc[] = [];
 
   if (districts.length > 0) {
-    // Материал белый: реальный цвет района держим per-instance (как у зданий),
-    // чтобы «Прочее»-квартал нёс свой цвет-агрегат и чтобы фильтр мог притенять.
-    plotMesh = new InstancedMesh(
-      new BoxGeometry(1, 1, 1),
-      new MeshLambertMaterial(),
+    // +1 стекло — НАСТОЯЩЕЕ матовое (`transmission`, вариант (б) из §II.3.7):
+    // дешёвый `transparent+opacity` физически НЕ размывает содержимое (только гасит
+    // альфой). `transmission` преломляет фон, `roughness` размывает его по мипам
+    // transmission-таргета → «мороз». Требует env-map (см. scene.ts). Тинт держим
+    // per-instance (GLASS_COLOR), material.color белый.
+    domeMesh = new InstancedMesh(
+      new RoundedBoxGeometry(1, 1, 1, DOME_ROUND_SEGMENTS, DOME_ROUND_RADIUS),
+      new MeshPhysicalMaterial({
+        metalness: 0,
+        roughness: GLASS_ROUGHNESS, // мороз: размывает прошедший свет
+        transmission: 1, // преломляет/пропускает фон (настоящее стекло)
+        thickness: 6, // «толщина» стекла — глубина преломления/затухания
+        ior: 1.45,
+        transparent: true,
+        depthWrite: false, // прозрачный проход: домики внутри просвечивают
+      }),
       districts.length,
     );
-    coarseMesh = new InstancedMesh(
-      new BoxGeometry(1, 1, 1),
-      new MeshLambertMaterial(),
+    domeMesh.renderOrder = 2; // после непрозрачных (здания/ободки/заглушки)
+    // Ободок — тот же скруглённый куб, что и купол (совпадение кривизны углов),
+    // footprint чуть БОЛЬШЕ купола (выступает поребриком). Металл виден только за
+    // счёт отражений env-map (см. scene.ts) — без неё рендерился бы чёрным. Только
+    // у +1 (постамент-обособление); у +2-теплиц ободка нет (вырожден).
+    ringMesh = new InstancedMesh(
+      new RoundedBoxGeometry(1, 1, 1, DOME_ROUND_SEGMENTS, DOME_ROUND_RADIUS),
+      new MeshStandardMaterial({ metalness: 0.9, roughness: 0.35 }),
       districts.length,
     );
+
     districts.forEach((d, j) => {
-      // Плот — тонкая плита на прямоугольнике района.
-      const plot = layoutToWorld(d.rect, PLOT_HEIGHT);
-      dummy.position.set(plot.centerX, PLOT_HEIGHT / 2, plot.centerZ);
-      dummy.scale.set(plot.width, PLOT_HEIGHT, plot.depth);
-      dummy.updateMatrix();
-      plotReal[j] = dummy.matrix.clone();
-      plotMesh!.setMatrixAt(j, ZERO_MATRIX); // старт: далёкий → плот скрыт
+      const full = layoutToWorld(d.rect, 0); // footprint района целиком (под ободок)
 
-      // Силуэт — блок во весь прямоугольник, высота = устаревание района.
-      const coarse = layoutToWorld(d.rect, d.coarseHeight);
-      dummy.position.set(coarse.centerX, coarse.height / 2, coarse.centerZ);
-      dummy.scale.set(coarse.width, coarse.height, coarse.depth);
-      dummy.updateMatrix();
-      coarseReal[j] = dummy.matrix.clone();
-      coarseMesh!.setMatrixAt(j, dummy.matrix); // старт: далёкий → силуэт виден
+      // Купол: footprint утоплен внутрь рамки, чтобы ободок выступал поребриком.
+      const dw = Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2);
+      const dd = Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2);
 
-      // Per-instance цвет = базовый цвет района (тинт-плот / агрегат для «Прочее»);
-      // material белый → итог = базовый цвет, а декор домножает material (не ломается),
-      // подсветка-фильтр притеняет per-instance (setHighlight).
-      plotMesh!.setColorAt(j, color.set(districtBaseColor(d.node)));
-      coarseMesh!.setColorAt(j, color.set(districtBaseColor(d.node)));
+      if (d.depth === 1) {
+        // +1: стеклянный купол + металлический ободок.
+        const h = domeHeight(d);
+        dummy.position.set(full.centerX, h / 2, full.centerZ);
+        dummy.scale.set(dw, h, dd);
+        dummy.updateMatrix();
+        domeReal[j] = dummy.matrix.clone();
+        domeMesh!.setMatrixAt(j, dummy.matrix);
+        domeMesh!.setColorAt(j, color.set(GLASS_COLOR));
 
-      districtPick[j] = { node: d.node, drillTarget: d.node };
+        dummy.position.set(full.centerX, RING_HEIGHT / 2, full.centerZ);
+        dummy.scale.set(dw + RING_RIM * 2, RING_HEIGHT, dd + RING_RIM * 2);
+        dummy.updateMatrix();
+        ringReal[j] = dummy.matrix.clone();
+        ringMesh!.setMatrixAt(j, dummy.matrix);
+        ringMesh!.setColorAt(j, color.set(ringBaseColor(d.node)));
+      } else {
+        // +2: ни купола, ни ободка — только серые кубы-заглушки (непрозрачные →
+        // размываются стеклом родительского +1). Инстансы купола/ободка вырождены.
+        domeReal[j] = ZERO_MATRIX;
+        ringReal[j] = ZERO_MATRIX;
+        domeMesh!.setMatrixAt(j, ZERO_MATRIX);
+        ringMesh!.setMatrixAt(j, ZERO_MATRIX);
+        buildStubs(stubs, d, j, dw, dd, full.centerX, full.centerZ, dummy);
+      }
+
+      // Пикинг купола: +1 → drill в сам район; +2 (заглушка внутри +1) → drill в
+      // родительский +1 (за один шаг ходим только на уровень глубже, §II.3.7).
+      const drillTarget =
+        d.depth === 2 && d.parentIdx !== null
+          ? districts[d.parentIdx].node
+          : d.node;
+      districtPick[j] = { node: d.node, drillTarget };
       districtIndexByPath.set(d.node.path, j);
-      placements.set(d.node.path, {
-        s: Math.max(plot.width, plot.depth) / CITY_SPAN,
-        cx: plot.centerX,
-        cz: plot.centerZ,
-        w: plot.width,
-        d: plot.depth,
-      });
+      // childPlacement только для +1 (реальные прямые дети текущего уровня).
+      if (d.depth === 1) {
+        placements.set(d.node.path, {
+          s: Math.max(full.width, full.depth) / CITY_SPAN,
+          cx: full.centerX,
+          cz: full.centerZ,
+          w: full.width,
+          d: full.depth,
+        });
+      }
     });
-    plotMesh.instanceMatrix.needsUpdate = true;
-    coarseMesh.instanceMatrix.needsUpdate = true;
-    if (plotMesh.instanceColor) plotMesh.instanceColor.needsUpdate = true;
-    if (coarseMesh.instanceColor) coarseMesh.instanceColor.needsUpdate = true;
-    group.add(plotMesh);
-    group.add(coarseMesh);
+    domeMesh.instanceMatrix.needsUpdate = true;
+    ringMesh.instanceMatrix.needsUpdate = true;
+    if (domeMesh.instanceColor) domeMesh.instanceColor.needsUpdate = true;
+    if (ringMesh.instanceColor) ringMesh.instanceColor.needsUpdate = true;
+    group.add(ringMesh);
+    group.add(domeMesh);
   }
 
-  // Облик: декор показывает только силуэты, притушенные; активный — всё.
-  // `excludedIdx` — район, ставший активным уровнем (его силуэт в декоре скрыт).
+  // --- Кубы-заглушки в один InstancedMesh (после раскладки всех теплиц).
+  // Непрозрачные: размываются стеклом родительского +1 купола (см. выше).
+  let stubMesh: InstancedMesh | null = null;
+  if (stubs.length > 0) {
+    stubMesh = new InstancedMesh(
+      new BoxGeometry(1, 1, 1),
+      new MeshStandardMaterial({ roughness: 0.7, metalness: 0 }),
+      stubs.length,
+    );
+    stubs.forEach((s, k) => {
+      stubMesh!.setMatrixAt(k, s.matrix);
+      stubMesh!.setColorAt(k, color.set(STUB_COLOR));
+    });
+    stubMesh.instanceMatrix.needsUpdate = true;
+    if (stubMesh.instanceColor) stubMesh.instanceColor.needsUpdate = true;
+    group.add(stubMesh);
+  }
+
+  // Облик: декор притушен, активный — полный. `excludedIdx` — район, ставший
+  // активным уровнем (его купол/застройка в декоре скрыты).
   let isDecor = false;
   let excludedIdx: number | null = null;
 
+  /** Принадлежит ли купол `j` исключённому поддереву (сам район или его +2-теплицы). */
+  const districtExcluded = (j: number): boolean =>
+    excludedIdx !== null &&
+    (j === excludedIdx || districts[j].parentIdx === excludedIdx);
+
   const view: CityView = {
-    updateLOD(camera) {
-      if (isDecor || !coarseMesh || !plotMesh) return; // декор/нет районов
-      const cam = camera.position;
-      let coarseDirty = false;
-      let plotDirty = false;
-      let buildingDirty = false;
-      const wc = new Vector3();
-      for (const d of lod) {
-        // Центр района в МИРЕ: уровень может быть смещён/масштабирован группой.
-        wc.copy(d.center);
-        group.localToWorld(wc);
-        const dist = Math.hypot(cam.x - wc.x, cam.y - wc.y, cam.z - wc.z);
-        const want = d.near ? dist < NEAR_EXIT : dist < NEAR_ENTER;
-        if (want === d.near) continue;
-        d.near = want;
-        if (want) {
-          coarseMesh.setMatrixAt(d.coarseId, ZERO_MATRIX);
-          plotMesh.setMatrixAt(d.plotId, plotReal[d.plotId]);
-          for (const id of d.buildingIds)
-            buildingMesh!.setMatrixAt(id, buildingReal[id]);
-        } else {
-          coarseMesh.setMatrixAt(d.coarseId, coarseReal[d.coarseId]);
-          plotMesh.setMatrixAt(d.plotId, ZERO_MATRIX);
-          for (const id of d.buildingIds)
-            buildingMesh!.setMatrixAt(id, ZERO_MATRIX);
-        }
-        coarseDirty = true;
-        plotDirty = true;
-        if (d.buildingIds.length > 0) buildingDirty = true;
-      }
-      if (coarseDirty) coarseMesh.instanceMatrix.needsUpdate = true;
-      if (plotDirty) plotMesh.instanceMatrix.needsUpdate = true;
-      if (buildingDirty && buildingMesh)
-        buildingMesh.instanceMatrix.needsUpdate = true;
+    updateLOD() {
+      // Детализация по глубине статична (§II.3.2) — покадрово делать нечего.
     },
     pickMeshes() {
       if (isDecor) return []; // декор не кликабелен (docs: формы без raycast)
       const out: InstancedMesh[] = [];
       if (buildingMesh) out.push(buildingMesh);
-      if (plotMesh) out.push(plotMesh);
-      if (coarseMesh) out.push(coarseMesh);
+      if (domeMesh) out.push(domeMesh); // +1 купола; +2 пикается через объемлющий +1
       return out;
     },
     resolvePick(mesh, instanceId) {
       if (mesh === buildingMesh) return buildingPick[instanceId] ?? null;
-      if (mesh === plotMesh || mesh === coarseMesh)
-        return districtPick[instanceId] ?? null;
+      if (mesh === domeMesh) return districtPick[instanceId] ?? null;
       return null;
     },
   };
 
-  /** Привести инстансы в декор-облик: только силуэты, притушенные. Силуэт района
-   * `excludedIdx` (ставшего активным уровнем) скрыт — иначе он накрыл бы активный. */
+  /** Притушить общий material меша до серого (per-instance цвета сохраняются). */
+  function grayOut(mesh: InstancedMesh): void {
+    const mat = mesh.material as MeshStandardMaterial | MeshLambertMaterial;
+    mat.color.setRGB(DECOR_GRAY, DECOR_GRAY, DECOR_GRAY);
+  }
+  /** Вернуть общий material меша к белому (per-instance цвет = итоговый). */
+  function whiten(mesh: InstancedMesh): void {
+    const mat = mesh.material as MeshStandardMaterial | MeshLambertMaterial;
+    mat.color.setRGB(1, 1, 1);
+  }
+
+  /** Привести инстансы в декор-облик: притушено, исключённое поддерево скрыто. */
   function applyDecor(): void {
     ground.visible = false;
     roadDots.visible = false;
+
     if (buildingMesh) {
-      buildingMesh.visible = true;
-      // Скрываем внутренние здания исключённого района (чтобы не перекрывали активный уровень),
-      // а все остальные здания (включая файлы родительского уровня) показываем.
       buildings.forEach((b, i) => {
-        if (b.districtIdx === excludedIdx) {
-          buildingMesh!.setMatrixAt(i, ZERO_MATRIX);
-        } else {
-          buildingMesh!.setMatrixAt(i, buildingReal[i]);
-        }
+        const hide = b.districtIdx !== null && b.districtIdx === excludedIdx;
+        buildingMesh!.setMatrixAt(i, hide ? ZERO_MATRIX : buildingReal[i]);
       });
       buildingMesh.instanceMatrix.needsUpdate = true;
-
-      const mat = buildingMesh.material as MeshLambertMaterial;
-      mat.color.setRGB(0.35, 0.35, 0.35); // Притушенные цвета
-      mat.transparent = false;
-      mat.opacity = 1;
-      mat.depthWrite = true;
+      grayOut(buildingMesh);
     }
-
-    if (plotMesh) {
-      plotMesh.visible = true;
-      // Скрываем подложку исключённого района, остальные показываем.
-      for (let j = 0; j < plotReal.length; j++) {
-        plotMesh.setMatrixAt(j, j === excludedIdx ? ZERO_MATRIX : plotReal[j]);
-      }
-      plotMesh.instanceMatrix.needsUpdate = true;
-
-      // Цвет района — per-instance; декор гасит общий material (серый), сохраняя
-      // относительные тона районов (в т.ч. «Прочее»).
-      const mat = plotMesh.material as MeshLambertMaterial;
-      mat.color.setRGB(0.35, 0.35, 0.35);
-      mat.transparent = false;
-      mat.opacity = 1;
-      mat.depthWrite = true;
+    if (domeMesh && ringMesh) {
+      // +2 инстансы купола/ободка и так вырождены (domeReal/ringReal = ZERO).
+      districts.forEach((_, j) => {
+        const hide = districtExcluded(j);
+        domeMesh!.setMatrixAt(j, hide ? ZERO_MATRIX : domeReal[j]);
+        ringMesh!.setMatrixAt(j, hide ? ZERO_MATRIX : ringReal[j]);
+      });
+      domeMesh.instanceMatrix.needsUpdate = true;
+      ringMesh.instanceMatrix.needsUpdate = true;
+      grayOut(domeMesh);
+      grayOut(ringMesh);
     }
-
-    if (coarseMesh) {
-      // В режиме декорации все папки раскрыты, поэтому скрываем все их силуэты-блоки
-      for (let j = 0; j < coarseReal.length; j++)
-        coarseMesh.setMatrixAt(j, ZERO_MATRIX);
-      coarseMesh.instanceMatrix.needsUpdate = true;
-      const mat = coarseMesh.material as MeshLambertMaterial;
-      mat.color.setRGB(0.35, 0.35, 0.35);
-      mat.transparent = false;
-      mat.opacity = 1;
-      mat.depthWrite = true;
+    if (stubMesh) {
+      stubs.forEach((s, k) => {
+        const hide = districtExcluded(s.districtIdx);
+        stubMesh!.setMatrixAt(k, hide ? ZERO_MATRIX : s.matrix);
+      });
+      stubMesh.instanceMatrix.needsUpdate = true;
+      grayOut(stubMesh);
     }
   }
 
-  /** Вернуть активный облик: всё видимо, материал плотный, LOD снова работает. */
+  /** Вернуть активный облик: всё видимо, материал плотный/белый, пикинг доступен. */
   function applyActive(): void {
     ground.visible = true;
     roadDots.visible = true;
+
     if (buildingMesh) {
-      buildingMesh.visible = true;
-      const mat = buildingMesh.material as MeshLambertMaterial;
-      mat.color.setRGB(1, 1, 1); // Восстанавливаем оригинальные цвета
-      mat.transparent = false;
-      mat.opacity = 1;
-      mat.depthWrite = true;
-    }
-    if (plotMesh) {
-      plotMesh.visible = true;
-      const mat = plotMesh.material as MeshLambertMaterial;
-      mat.color.setRGB(1, 1, 1); // цвет района — per-instance
-      mat.transparent = false;
-      mat.opacity = 1;
-      mat.depthWrite = true;
-    }
-    if (coarseMesh) {
-      const mat = coarseMesh.material as MeshLambertMaterial;
-      mat.color.setRGB(1, 1, 1); // цвет района — per-instance
-      mat.transparent = false;
-      mat.opacity = 1;
-      mat.depthWrite = true;
-    }
-    // Сбросить LOD-состояние: пусть updateLOD пересчитает по текущей камере.
-    for (const d of lod) d.near = false;
-    if (coarseMesh) {
-      for (let j = 0; j < coarseReal.length; j++)
-        coarseMesh.setMatrixAt(j, coarseReal[j]);
-      coarseMesh.instanceMatrix.needsUpdate = true;
-    }
-    if (plotMesh) {
-      for (let j = 0; j < plotReal.length; j++)
-        plotMesh.setMatrixAt(j, ZERO_MATRIX);
-      plotMesh.instanceMatrix.needsUpdate = true;
-    }
-    if (buildingMesh) {
-      // Восстанавливаем файлы верхнего уровня и скрываем вложенные здания.
-      buildings.forEach((b, i) => {
-        buildingMesh!.setMatrixAt(
-          i,
-          b.districtIdx === null ? buildingReal[i] : ZERO_MATRIX,
-        );
-      });
+      buildings.forEach((_, i) =>
+        buildingMesh!.setMatrixAt(i, buildingReal[i]),
+      );
       buildingMesh.instanceMatrix.needsUpdate = true;
+      whiten(buildingMesh);
+    }
+    if (domeMesh && ringMesh) {
+      districts.forEach((_, j) => {
+        domeMesh!.setMatrixAt(j, domeReal[j]);
+        ringMesh!.setMatrixAt(j, ringReal[j]);
+      });
+      domeMesh.instanceMatrix.needsUpdate = true;
+      ringMesh.instanceMatrix.needsUpdate = true;
+      whiten(domeMesh);
+      whiten(ringMesh);
+    }
+    if (stubMesh) {
+      stubs.forEach((s, k) => stubMesh!.setMatrixAt(k, s.matrix));
+      stubMesh.instanceMatrix.needsUpdate = true;
+      whiten(stubMesh);
     }
   }
 
@@ -677,71 +747,103 @@ export function buildLevel(
     setActive() {
       if (!isDecor) return;
       isDecor = false;
-      excludedIdx = null; // вернётся в активный — все силуэты снова в игре (LOD)
+      excludedIdx = null;
       applyActive();
     },
     setHighlight(match) {
-      // Здания: база — цвет категории (папка-превью → структурный цвет плота).
-      if (buildingMesh) {
-        buildings.forEach((b, i) => {
-          color.set(baseBuildingColor(b.node));
-          if (match && !match(b.node)) color.multiplyScalar(DIM_FACTOR);
-          buildingMesh!.setColorAt(i, color);
-        });
-        if (buildingMesh.instanceColor)
-          buildingMesh.instanceColor.needsUpdate = true;
-      }
-      // Районы (плот + силуэт): база — цвет района (тинт-плот / агрегат «Прочее»).
-      if (plotMesh && coarseMesh) {
-        districts.forEach((d, j) => {
-          color.set(districtBaseColor(d.node));
-          if (match && !match(d.node)) color.multiplyScalar(DIM_FACTOR);
-          plotMesh!.setColorAt(j, color);
-          coarseMesh!.setColorAt(j, color);
-        });
-        if (plotMesh.instanceColor) plotMesh.instanceColor.needsUpdate = true;
-        if (coarseMesh.instanceColor)
-          coarseMesh.instanceColor.needsUpdate = true;
-      }
+      paintAll((node, base) => {
+        color.set(base);
+        if (match && !match(node)) color.multiplyScalar(DIM_FACTOR);
+        return color;
+      });
     },
-    setCleanup(view) {
-      // Цвет узла в виде очистки: помечен → красный акцент; кандидат → полный
-      // цвет; иначе → приглушён (×DIM). `null` — базовые цвета (выход из вида;
-      // владелец затем восстановит подсветку-фильтр через setHighlight).
-      const colorFor = (node: ScanNode, base: number): number => {
-        if (!view) return base;
-        if (view.isMarked(node)) return CLEANUP_MARK_COLOR;
-        return view.isCandidate(node) ? base : -1; // -1 = dim
-      };
-      if (buildingMesh) {
-        buildings.forEach((b, i) => {
-          const base = baseBuildingColor(b.node);
-          const c = colorFor(b.node, base);
-          color.set(c === -1 ? base : c);
-          if (c === -1) color.multiplyScalar(DIM_FACTOR);
-          buildingMesh!.setColorAt(i, color);
-        });
-        if (buildingMesh.instanceColor)
-          buildingMesh.instanceColor.needsUpdate = true;
-      }
-      if (plotMesh && coarseMesh) {
-        districts.forEach((d, j) => {
-          const base = districtBaseColor(d.node);
-          const c = colorFor(d.node, base);
-          color.set(c === -1 ? base : c);
-          if (c === -1) color.multiplyScalar(DIM_FACTOR);
-          plotMesh!.setColorAt(j, color);
-          coarseMesh!.setColorAt(j, color);
-        });
-        if (plotMesh.instanceColor) plotMesh.instanceColor.needsUpdate = true;
-        if (coarseMesh.instanceColor)
-          coarseMesh.instanceColor.needsUpdate = true;
-      }
+    setCleanup(cleanup) {
+      paintAll((node, base) => {
+        if (!cleanup) {
+          color.set(base);
+          return color;
+        }
+        if (cleanup.isMarked(node)) {
+          color.set(CLEANUP_MARK_COLOR);
+          return color;
+        }
+        color.set(base);
+        if (!cleanup.isCandidate(node)) color.multiplyScalar(DIM_FACTOR);
+        return color;
+      });
     },
     dispose() {
       disposeGroup(group);
     },
   };
+
+  /**
+   * Перекрасить per-instance цвета всех мешей по правилу `paint(node, baseColor)`.
+   * База: здания — цвет файла; купол — нейтральное стекло; ободок — цвет района;
+   * заглушка — серый, по узлу её +2-района. Купол/ободок/заглушки одного района
+   * красятся согласованно (узел района).
+   */
+  function paintAll(paint: (node: ScanNode, base: number) => Color): void {
+    if (buildingMesh) {
+      buildings.forEach((b, i) => {
+        const c = paint(b.node, baseBuildingColor(b.node));
+        buildingMesh!.setColorAt(i, c);
+      });
+      if (buildingMesh.instanceColor)
+        buildingMesh.instanceColor.needsUpdate = true;
+    }
+    if (domeMesh && ringMesh) {
+      // +2 инстансы купола/ободка вырождены (не видны), но цвет держим согласованным.
+      districts.forEach((d, j) => {
+        domeMesh!.setColorAt(j, paint(d.node, GLASS_COLOR));
+        ringMesh!.setColorAt(j, paint(d.node, ringBaseColor(d.node)));
+      });
+      if (domeMesh.instanceColor) domeMesh.instanceColor.needsUpdate = true;
+      if (ringMesh.instanceColor) ringMesh.instanceColor.needsUpdate = true;
+    }
+    if (stubMesh) {
+      stubs.forEach((s, k) => {
+        const node = districts[s.districtIdx].node;
+        stubMesh!.setColorAt(k, paint(node, STUB_COLOR));
+      });
+      if (stubMesh.instanceColor) stubMesh.instanceColor.needsUpdate = true;
+    }
+  }
+}
+
+/**
+ * Четыре серых куба-заглушки 2×2 внутри footprint купола-теплицы (+2). Высоты
+ * разные («четыре разных серых куба», §II.3.2). Кубы — фиксированный декоративный
+ * паттерн (не отражают реальное число детей), нарочито невзрачный.
+ */
+function buildStubs(
+  out: { matrix: Matrix4; districtIdx: number }[],
+  d: DistrictAcc,
+  districtIdx: number,
+  domeW: number,
+  domeD: number,
+  cx: number,
+  cz: number,
+  dummy: Object3D,
+): void {
+  const gx = domeW * STUB_GAP;
+  const gz = domeD * STUB_GAP;
+  const cellW = (domeW - gx) / 2;
+  const cellD = (domeD - gz) / 2;
+  const baseH = STUB_CANON_HEIGHT * d.footprintScale;
+  let k = 0;
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      const h = baseH * STUB_HEIGHT_RATIOS[k % STUB_HEIGHT_RATIOS.length];
+      const px = cx + (sx * (cellW + gx)) / 2;
+      const pz = cz + (sz * (cellD + gz)) / 2;
+      dummy.position.set(px, h / 2, pz);
+      dummy.scale.set(cellW * 0.8, h, cellD * 0.8);
+      dummy.updateMatrix();
+      out.push({ matrix: dummy.matrix.clone(), districtIdx });
+      k++;
+    }
+  }
 }
 
 /** clamp+smoothstep на [0,1] — мягкая интерполяция для радиального угасания. */
@@ -835,7 +937,7 @@ function addCurbDots(dots: DotSpec[], r: TreemapRect): void {
 }
 
 /**
- * Слой точек-дорог: бордюры вокруг блоков верхнего уровня (районы + файлы) +
+ * Слой точек-дорог: бордюры вокруг блоков верхнего уровня (купола-районы + файлы) +
  * равномерное поле-сетка на апроне, гаснущее по расстоянию от края города.
  * Один `InstancedMesh` с per-instance цветом; цвет точки = локальный цвет земли,
  * подмешанный к белому на её «яркость», так далёкие точки тают вместе с землёй.
@@ -847,9 +949,11 @@ function buildRoadDots(
 ): InstancedMesh {
   const dots: DotSpec[] = [];
 
-  // 1) Бордюры вокруг блоков верхнего уровня (районы + файлы верхнего уровня;
-  //    вложенные превью внутри районов — не блоки, у них нет дорог).
-  for (const d of districts) addCurbDots(dots, d.rect);
+  // 1) Бордюры вокруг блоков верхнего уровня (купола +1 + файлы верхнего уровня;
+  //    вложенное содержимое куполов — не блоки, у них нет дорог).
+  for (const d of districts) {
+    if (d.depth === 1) addCurbDots(dots, d.rect);
+  }
   for (const b of buildings) {
     if (b.districtIdx === null) addCurbDots(dots, b.rect);
   }

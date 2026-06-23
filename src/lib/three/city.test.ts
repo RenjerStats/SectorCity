@@ -1,18 +1,21 @@
 /**
- * Тесты графики уровня (`city.ts`): LOD-переключения и фикс окклюзии декора.
+ * Тесты графики уровня (`city.ts`): папки-купола, детализация по глубине и фикс
+ * окклюзии декора (vision §II.3).
  *
  * Three.js-математика матриц работает headless — WebGL не нужен. Видимость
  * инстанса проверяем по его матрице (scale=0 ⇒ скрыт; см. `test-fixtures`).
  *
- * Регрессия, ради которой написан тест: «после drill вся папка — один блок, LOD
- * намертво ломается». Причина была в декоре — силуэт района, ставшего активным
- * уровнем, после `G⁻¹` раздувался в начало координат и накрывал активный город.
- * Фикс: `setDecor(excludePath)` скрывает силуэт именно этого района.
+ * Модель: дистанционного LOD больше нет — детализация задаётся ГЛУБИНОЙ. Прямые
+ * дети текущей папки (+1) рисуются полноценными куполами с реальной застройкой
+ * ВСЕГДА (камера на облик не влияет). Регрессия, ради которой жив тест декора:
+ * «после drill вся папка — один блок» — купол района, ставшего активным уровнем,
+ * после `G⁻¹` раздувался в начало координат и накрывал активный город; фикс —
+ * `setDecor(excludePath)` скрывает именно этот купол и его застройку.
  */
 import { describe, expect, it } from "vitest";
 import { Color, PerspectiveCamera } from "three";
 import { buildLevel, CITY_SPAN, DIM_FACTOR } from "./city";
-import { CATEGORY_COLOR, DISTRICT_PLOT_COLOR } from "./palette";
+import { CATEGORY_COLOR } from "./palette";
 import {
   dir,
   file,
@@ -24,7 +27,7 @@ import {
 
 const SPAN = { w: CITY_SPAN, d: CITY_SPAN };
 
-/** Корень с двумя районами (есть превью детей) и одним файлом верхнего уровня. */
+/** Корень с двумя папками (+1, есть превью детей) и одним файлом верхнего уровня. */
 function rootNodes() {
   return [
     dir("/a", [file("/a/1", 100, "code"), file("/a/2", 60, "image")]),
@@ -33,77 +36,127 @@ function rootNodes() {
   ];
 }
 
-describe("buildLevel + LOD", () => {
-  it("далёкая камера: районы — силуэты, вложенные превью скрыты", () => {
+/** Найти инстанс здания по пути узла (через resolvePick). */
+function buildingIdxOf(
+  level: ReturnType<typeof buildLevel>,
+  path: string,
+): number | null {
+  const building = level.view.pickMeshes()[0];
+  for (let i = 0; i < building.count; i++) {
+    const info = level.view.resolvePick(building, i);
+    if (info && info.node.path === path) return i;
+  }
+  return null;
+}
+
+describe("buildLevel: купола (+1) и детализация по глубине", () => {
+  it("прямые папки (+1) — купола; их домики и файлы верхнего уровня видны всегда", () => {
     const level = buildLevel(rootNodes(), SPAN, "root");
+    const [building, dome] = level.view.pickMeshes();
+
+    // Два купола-папки (/a, /b).
+    expect(dome.count).toBe(2);
+    expect(visibleCount(dome)).toBe(2);
+
+    // Здания: /a/1, /a/2 (внутри купола /a), /b/1 (внутри /b), /c (верхний уровень).
+    expect(building.count).toBe(4);
+    expect(visibleCount(building)).toBe(4);
+
+    // Облик не зависит от камеры (нет дистанционного LOD).
     const camera = new PerspectiveCamera();
-    camera.position.set(0, 5000, 5000); // далеко от всех районов
-
+    camera.position.set(0, 5000, 5000);
     level.view.updateLOD(camera);
-
-    const meshes = level.view.pickMeshes(); // [building, plot, coarse]
-    const building = meshes[0];
-    const plot = meshes[1];
-    const coarse = meshes[2];
-
-    // Оба района видны грубыми силуэтами.
-    expect(visibleCount(coarse)).toBe(2);
-    // Плоты районов скрыты, пока район далёкий.
-    expect(visibleCount(plot)).toBe(0);
-    // Из зданий виден только файл верхнего уровня (/c); вложенные превью скрыты.
-    expect(visibleCount(building)).toBe(1);
+    expect(visibleCount(dome)).toBe(2);
+    expect(visibleCount(building)).toBe(4);
 
     level.dispose();
   });
 
-  it("камера у района: он раскрывается (силуэт↓, плот↑, вложенные здания↑)", () => {
+  it("папка внутри папки (+2) — серые кубы без своей стеклянной оболочки", () => {
+    const nodes = [dir("/a", [dir("/a/sub", [file("/a/sub/1", 100, "code")])])];
+    const level = buildLevel(nodes, SPAN, "root");
+    const meshes = level.view.pickMeshes();
+
+    // Зданий нет (у /a нет файлов-листьев напрямую) → в пикинге только купол +1
+    // (/a). У +2 (/a/sub) своей стеклянной оболочки НЕТ — её кубы попадают в
+    // transmission-буфер родителя и размываются; пикается +2 через объемлющий +1.
+    expect(meshes.length).toBe(1);
+    const domeMesh = meshes[0];
+
+    // Виден ровно один купол (/a, +1); /a/sub своего купола не имеет.
+    expect(visibleCount(domeMesh)).toBe(1);
+
+    for (let i = 0; i < domeMesh.count; i++) {
+      const info = level.view.resolvePick(domeMesh, i);
+      if (!info) continue;
+      if (info.node.path === "/a") {
+        // +1: видим и drill ведёт в себя.
+        expect(isHidden(matrixAt(domeMesh, i))).toBe(false);
+        expect(info.drillTarget.path).toBe("/a");
+      }
+      if (info.node.path === "/a/sub") {
+        // +2: инстанс купола вырожден (оболочки нет).
+        expect(isHidden(matrixAt(domeMesh, i))).toBe(true);
+      }
+    }
+
+    level.dispose();
+  });
+
+  it("пикинг: купол → drill в папку, файл верхнего уровня → select (drillTarget = он сам)", () => {
     const level = buildLevel(rootNodes(), SPAN, "root");
-    const coarse = level.view.pickMeshes()[2];
-    const building = level.view.pickMeshes()[0];
-    const plot = level.view.pickMeshes()[1];
+    const dome = level.view.pickMeshes()[1];
 
-    const pa = level.childPlacement("/a");
-    expect(pa).not.toBeNull();
-    const idxA = findInstanceAt(coarse, pa!.cx, pa!.cz);
+    // Купол /a → drill в /a.
+    const idxA = findInstanceAt(
+      dome,
+      level.childPlacement("/a")!.cx,
+      level.childPlacement("/a")!.cz,
+    );
     expect(idxA).not.toBeNull();
+    expect(level.view.resolvePick(dome, idxA!)!.drillTarget.path).toBe("/a");
 
-    const camera = new PerspectiveCamera();
-    camera.position.set(pa!.cx, 10, pa!.cz); // вплотную к району /a
+    // Файл верхнего уровня /c: drillTarget = он сам (не папка → уйдёт в select).
+    const cIdx = buildingIdxOf(level, "/c")!;
+    const info = level.view.resolvePick(level.view.pickMeshes()[0], cIdx)!;
+    expect(info.drillTarget.path).toBe("/c");
+    expect(info.drillTarget.isDir).toBe(false);
 
-    const buildingsVisibleBefore = visibleCount(building);
-    level.view.updateLOD(camera);
-
-    // Силуэт /a погас, плот /a зажёгся.
-    expect(isHidden(matrixAt(coarse, idxA!))).toBe(true);
-    expect(isHidden(matrixAt(plot, idxA!))).toBe(false);
-    // Появились вложенные здания (как минимум превью /a).
-    expect(visibleCount(building)).toBeGreaterThan(buildingsVisibleBefore);
+    // Вложенный домик /a/1: drillTarget = родительская папка /a.
+    const aChild = buildingIdxOf(level, "/a/1")!;
+    expect(
+      level.view.resolvePick(level.view.pickMeshes()[0], aChild)!.drillTarget
+        .path,
+    ).toBe("/a");
 
     level.dispose();
   });
 });
 
 describe("setDecor (фикс окклюзии) / setActive", () => {
-  it("setDecor(excludePath) скрывает вложенный район, а прочие папки раскрывает как декор", () => {
+  it("setDecor(excludePath) скрывает купол и застройку ставшего активным района", () => {
     const level = buildLevel(rootNodes(), SPAN, "root");
-    const meshes = level.view.pickMeshes();
-    const coarse = meshes[2];
-    const plot = meshes[1];
+    const [building, dome] = level.view.pickMeshes();
 
-    const pa = level.childPlacement("/a")!;
-    const pb = level.childPlacement("/b")!;
-    const idxA = findInstanceAt(coarse, pa.cx, pa.cz)!;
-    const idxB = findInstanceAt(coarse, pb.cx, pb.cz)!;
+    const idxA = findInstanceAt(
+      dome,
+      level.childPlacement("/a")!.cx,
+      level.childPlacement("/a")!.cz,
+    )!;
+    const idxB = findInstanceAt(
+      dome,
+      level.childPlacement("/b")!.cx,
+      level.childPlacement("/b")!.cz,
+    )!;
+    const a1 = buildingIdxOf(level, "/a/1")!;
 
     level.setDecor("/a");
 
-    // Исключённый район /a (ставший активным) полностью скрыт на всех мешах:
-    expect(isHidden(matrixAt(coarse, idxA))).toBe(true);
-    expect(isHidden(matrixAt(plot, idxA))).toBe(true);
-
-    // А соседний район /b раскрыт (силуэт скрыт, но plot виден):
-    expect(isHidden(matrixAt(coarse, idxB))).toBe(true);
-    expect(isHidden(matrixAt(plot, idxB))).toBe(false);
+    // Купол /a скрыт, его внутренний домик /a/1 скрыт.
+    expect(isHidden(matrixAt(dome, idxA))).toBe(true);
+    expect(isHidden(matrixAt(building, a1))).toBe(true);
+    // Соседний купол /b остаётся виден (контекст-декор).
+    expect(isHidden(matrixAt(dome, idxB))).toBe(false);
 
     // Декор не кликабелен.
     expect(level.view.pickMeshes()).toEqual([]);
@@ -111,19 +164,35 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
     level.dispose();
   });
 
-  it("setActive возвращает все силуэты и пикинг", () => {
+  it("setActive возвращает купол и пикинг", () => {
     const level = buildLevel(rootNodes(), SPAN, "root");
-    const coarse = level.view.pickMeshes()[2];
-    const pa = level.childPlacement("/a")!;
-    const idxA = findInstanceAt(coarse, pa.cx, pa.cz)!;
+    const dome = level.view.pickMeshes()[1];
+    const idxA = findInstanceAt(
+      dome,
+      level.childPlacement("/a")!.cx,
+      level.childPlacement("/a")!.cz,
+    )!;
 
     level.setDecor("/a");
-    expect(isHidden(matrixAt(coarse, idxA))).toBe(true);
+    expect(isHidden(matrixAt(dome, idxA))).toBe(true);
 
     level.setActive();
-    // Силуэт /a снова в игре (LOD пересчитает по камере), пикинг доступен.
-    expect(isHidden(matrixAt(coarse, idxA))).toBe(false);
+    expect(isHidden(matrixAt(dome, idxA))).toBe(false);
     expect(level.view.pickMeshes().length).toBeGreaterThan(0);
+
+    level.dispose();
+  });
+
+  it("в декоре меши видимы, но material притушен до серого (не полупрозрачны)", () => {
+    const level = buildLevel(rootNodes(), SPAN, "root");
+    const [building, dome] = level.view.pickMeshes();
+
+    level.setDecor("/a");
+
+    const buildMat = building.material as any;
+    expect(buildMat.color.r).toBeCloseTo(0.35);
+    const domeMat = dome.material as any;
+    expect(domeMat.color.r).toBeCloseTo(0.35);
 
     level.dispose();
   });
@@ -132,17 +201,8 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
     const level = buildLevel(rootNodes(), SPAN, "root");
     const building = level.view.pickMeshes()[0];
 
-    const idxOf = (path: string): number | null => {
-      for (let i = 0; i < building.count; i++) {
-        const info = level.view.resolvePick(building, i);
-        if (info && info.node.path === path) return i;
-      }
-      return null;
-    };
-    const cIdx = idxOf("/c")!; // файл верхнего уровня (archive)
-    const aChildIdx = idxOf("/a/1")!; // вложенное превью (code)
-    expect(cIdx).not.toBeNull();
-    expect(aChildIdx).not.toBeNull();
+    const cIdx = buildingIdxOf(level, "/c")!; // файл верхнего уровня (archive)
+    const aChildIdx = buildingIdxOf(level, "/a/1")!; // вложенный домик (code)
 
     // Подсветить только /c: оно — в полном цвете категории, /a/1 — притушено.
     level.setHighlight((n) => n.path === "/c");
@@ -159,55 +219,6 @@ describe("setDecor (фикс окклюзии) / setActive", () => {
     level.setHighlight(null);
     building.getColorAt(aChildIdx, col);
     expect(col.getHex()).toBe(CATEGORY_COLOR.code);
-
-    level.dispose();
-  });
-
-  it("папки на превью (depth 2) окрашиваются в DISTRICT_PLOT_COLOR", () => {
-    const nodes = [dir("/a", [dir("/a/sub", [file("/a/sub/1", 100, "code")])])];
-    const level = buildLevel(nodes, SPAN, "root");
-    const building = level.view.pickMeshes()[0]; // buildingMesh
-
-    let subIdx: number | null = null;
-    for (let i = 0; i < building.count; i++) {
-      const info = level.view.resolvePick(building, i);
-      if (info && info.node.path === "/a/sub") {
-        subIdx = i;
-        break;
-      }
-    }
-    expect(subIdx).not.toBeNull();
-
-    const col = new Color();
-    building.getColorAt(subIdx!, col);
-    expect(col.getHex()).toBe(DISTRICT_PLOT_COLOR);
-    level.dispose();
-  });
-
-  it("в режиме decor buildingMesh и plotMesh остаются видимыми, но приглушаются цветом (не полупрозрачные)", () => {
-    const level = buildLevel(rootNodes(), SPAN, "root");
-    const meshes = level.view.pickMeshes();
-    const building = meshes[0];
-    const plot = meshes[1];
-
-    level.setDecor("/a");
-
-    expect(building.visible).toBe(true);
-    expect(plot.visible).toBe(true);
-
-    const buildMat = building.material as any;
-    expect(buildMat.transparent).toBe(false);
-    expect(buildMat.color.r).toBeCloseTo(0.35);
-    expect(buildMat.color.g).toBeCloseTo(0.35);
-    expect(buildMat.color.b).toBeCloseTo(0.35);
-
-    // Цвет района теперь per-instance (как у зданий): декор гасит общий material
-    // до нейтрального серого 0.35, сохраняя относительные тона районов.
-    const plotMat = plot.material as any;
-    expect(plotMat.transparent).toBe(false);
-    expect(plotMat.color.r).toBeCloseTo(0.35);
-    expect(plotMat.color.g).toBeCloseTo(0.35);
-    expect(plotMat.color.b).toBeCloseTo(0.35);
 
     level.dispose();
   });

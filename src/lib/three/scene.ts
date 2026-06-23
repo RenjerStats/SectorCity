@@ -15,11 +15,13 @@ import {
   Group,
   type Object3D,
   PerspectiveCamera,
+  PMREMGenerator,
   Scene,
   Vector3,
   WebGLRenderer,
 } from "three";
 import { MapControls } from "three/examples/jsm/controls/MapControls.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { Easing, Group as TweenGroup, Tween } from "@tweenjs/tween.js";
 import { INITIAL_CAMERA_POS, INITIAL_TARGET } from "./home";
 
@@ -62,11 +64,28 @@ export interface SceneHandle {
  * владелец обязан вызвать `dispose()` при размонтировании.
  */
 export function createScene(canvas: HTMLCanvasElement): SceneHandle {
-  const renderer = new WebGLRenderer({ canvas, antialias: true });
+  // `powerPreference: "high-performance"` — подсказка вебвью/ОС выбрать ДИСКРЕТНУЮ
+  // GPU, а не встроенную (на ноутбуках с переключаемой графикой WebGL по умолчанию
+  // часто садится на iGPU). На WebView2/Chromium это маппится в DXGI-предпочтение
+  // high-performance. `failIfMajorPerformanceCaveat: false` — не падать в софт-рендер.
+  const renderer = new WebGLRenderer({
+    canvas,
+    antialias: true,
+    powerPreference: "high-performance",
+    failIfMajorPerformanceCaveat: false,
+  });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
   const scene = new Scene();
   scene.background = new Color(0x080808); // = --bg (Nothing deep black, синхр. с DOM)
+
+  // Окружение (IBL) для PBR-материалов: без него металл-ободок купола рендерится
+  // ЧЁРНЫМ (у металла нет диффуза — только отражения), а стекло не ловит fresnel.
+  // `RoomEnvironment` — лёгкая процедурная «студия»; PMREM генерится один раз.
+  // Lambert-материалы города (здания/земля) envMap игнорируют → остаются матовыми.
+  const pmrem = new PMREMGenerator(renderer);
+  const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
+  scene.environment = envRT.texture;
 
   // far большой: декор (родительский уровень) после origin shift раздут в 1/s и
   // выглядывает по краям холста — он должен оставаться в пределах отсечения.
@@ -180,6 +199,8 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
       frameCallbacks.clear();
       observer.disconnect();
       controls.dispose();
+      envRT.dispose();
+      pmrem.dispose();
       renderer.dispose();
     },
   };
