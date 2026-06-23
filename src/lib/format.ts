@@ -30,6 +30,12 @@ export function formatSizeParts(bytes: number): {
     : { value: s.slice(0, i), unit: s.slice(i + 1) };
 }
 
+/** Последний сегмент пути (имя файла/папки); пустой путь → сам путь. */
+export function baseName(path: string): string {
+  const seg = path.split(/[/\\]/).filter(Boolean);
+  return seg.length > 0 ? seg[seg.length - 1] : path;
+}
+
 /** Дата из unix-секунд в локальном формате (ru); 0/невалидное → прочерк. */
 export function formatDate(unixSeconds: number): string {
   if (!unixSeconds) return "—";

@@ -5,10 +5,9 @@
    *
    * Презентационный shell: кнопки лишь шлют команды в стор (`dispatchCommand`) —
    * исполняет владелец сцены (Scene). Поиск — отдельный компонент, пишет в свой
-   * стор. «Сканер мусора» / «Показать скрытое» / выбор темы добавляются сюда
-   * позже (структура регионов готова).
+   * стор. Выбор темы добавится сюда позже (структура регионов готова).
    */
-  import { appMode, markedCount, markedBytes } from "../store/mode";
+  import { appMode, markedCount, markedBytes, breadcrumbs, hiddenPaths } from "../store/mode";
   import {
     dispatchCommand,
     filtersOpen,
@@ -23,6 +22,11 @@
   let filters = $derived($filtersOpen);
   let marked = $derived($markedCount);
   let markedSize = $derived($markedBytes);
+  let canReroot = $derived(
+    $breadcrumbs.length > 1 &&
+      !$breadcrumbs[$breadcrumbs.length - 1]?.path.endsWith("::<other>")
+  );
+  let hiddenCount = $derived($hiddenPaths.length);
 </script>
 
 <header class="header">
@@ -78,6 +82,21 @@
         onclick={toggleFilters}
       >
         Фильтры
+      </button>
+      {#if hiddenCount > 0}
+        <button
+          class="btn"
+          onclick={() => dispatchCommand({ kind: "toggleHidden" })}
+        >
+          Показать скрытое ({hiddenCount})
+        </button>
+      {/if}
+      <button
+        class="btn"
+        disabled={!canReroot}
+        onclick={() => dispatchCommand({ kind: "reroot" })}
+      >
+        Сделать корнем
       </button>
       <button class="btn" onclick={() => dispatchCommand({ kind: "reset" })}>
         Сбросить вид
@@ -157,6 +176,10 @@
     cursor: not-allowed;
   }
   .btn:disabled:hover {
+    background: var(--surface-2);
+    border-color: var(--border);
+  }
+  .btn-primary:disabled:hover {
     background: var(--accent);
     border-color: transparent;
   }

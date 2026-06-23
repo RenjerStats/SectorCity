@@ -13,16 +13,18 @@
    * добавлением ветки сюда ИЛИ временным захватом слота из своего компонента.
    */
   import { appMode, scanProgress } from "../store/mode";
-  import { footerSlot, levelSummary, filtersOpen } from "../store/ui";
+  import { footerSlot, levelSummary, filtersOpen, hiddenOpen } from "../store/ui";
   import DiskMapProgress from "./footer/DiskMapProgress.svelte";
   import DiskFillBar from "./footer/DiskFillBar.svelte";
   import Legend from "./Legend.svelte";
   import FilterPanel from "./FilterPanel.svelte";
   import CleanupPanel from "./CleanupPanel.svelte";
+  import HiddenPanel from "./HiddenPanel.svelte";
 
   let override = $derived($footerSlot);
   let mode = $derived($appMode);
   let filters = $derived($filtersOpen);
+  let hidden = $derived($hiddenOpen);
 </script>
 
 <footer class="footer">
@@ -32,6 +34,8 @@
     <DiskMapProgress progress={$scanProgress} />
   {:else if mode.kind === "cleanup"}
     <CleanupPanel />
+  {:else if hidden}
+    <HiddenPanel />
   {:else if filters}
     <FilterPanel />
   {:else}

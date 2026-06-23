@@ -32,7 +32,11 @@ export type UiCommand =
   /** Выйти из режима сканера мусора в обычный Обзор. */
   | { kind: "exitCleanup" }
   /** Обновить текущий уровень на сцене. */
-  | { kind: "refresh" };
+  | { kind: "refresh" }
+  /** Сделать эту папку корнем (переоткрыть уровень как новый корень). */
+  | { kind: "reroot" }
+  /** Открыть/закрыть панель скрытого. */
+  | { kind: "toggleHidden" };
 
 /** Текущая невыполненная команда; `null` — нет команды (исполнитель её снимает). */
 export const uiCommand = atom<UiCommand | null>(null);
@@ -51,6 +55,18 @@ export const filtersOpen = atom<boolean>(false);
 /** Переключить видимость панели фильтров. */
 export function toggleFilters(): void {
   filtersOpen.set(!filtersOpen.get());
+}
+
+/**
+ * Открыта ли панель скрытого в footer (кнопка «Показать скрытое (N)» в header).
+ * Сам набор скрытого живёт в `hiddenPaths` (store/mode); это только видимость
+ * панели управления возвратом. Снимается, когда возвращать больше нечего.
+ */
+export const hiddenOpen = atom<boolean>(false);
+
+/** Переключить видимость панели скрытого. */
+export function toggleHidden(): void {
+  hiddenOpen.set(!hiddenOpen.get());
 }
 
 /**

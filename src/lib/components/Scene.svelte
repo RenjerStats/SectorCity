@@ -19,6 +19,7 @@
     currentRoot,
   } from "../ipc/commands";
   import { revealInExplorer } from "../ipc/actions";
+  import { baseName } from "../format";
   import {
     appMode,
     scanProgress,
@@ -37,9 +38,18 @@
     categoryFilterEmpty,
     categoryMaskOf,
     showAggregate,
+    hiddenPaths,
+    hideNode,
+    clearHidden,
     type CandidateFilter,
   } from "../store/mode";
-  import { uiCommand, levelSummary, setCleanupConfirm } from "../store/ui";
+  import {
+    uiCommand,
+    levelSummary,
+    setCleanupConfirm,
+    hiddenOpen,
+    toggleHidden,
+  } from "../store/ui";
   import type {
     AggSpec,
     Category,
@@ -127,20 +137,26 @@
   function getFilteredNodes(nodes: ScanNode[]): ScanNode[] {
     const catActive = categoryFilterActive.get();
     const hideAgg = !showAggregate.get();
-    if (!catActive && !hideAgg) return nodes;
+    const hidden = hiddenPaths.get();
+    const hiddenSet = hidden.length > 0 ? new Set(hidden) : null;
+    if (!catActive && !hideAgg && !hiddenSet) return nodes;
     const mask = catActive ? categoryMaskOf(categoryFilter.get()) : null;
-    return filterNodesRec(nodes, mask, hideAgg);
+    return filterNodesRec(nodes, mask, hideAgg, hiddenSet);
   }
 
   /** Рекурсивно отфильтровать узлы уровня и их превью. `mask = null` — фильтр
-   *  категорий выключен (режем только мелочь по `hideAgg`). */
+   *  категорий выключен (режем только мелочь по `hideAgg`); `hiddenSet = null` —
+   *  скрытых узлов нет. Скрытие по `path` — структурная операция (узел убран из
+   *  раскладки, соседи перетекают), действует рекурсивно, включая превью. */
   function filterNodesRec(
     nodes: ScanNode[],
     mask: number | null,
     hideAgg: boolean,
+    hiddenSet: Set<string> | null,
   ): ScanNode[] {
     const out: ScanNode[] = [];
     for (const n of nodes) {
+      if (hiddenSet && hiddenSet.has(n.path)) continue;
       if (hideAgg && n.flags.includes("aggregated")) continue;
       // Маска: у файла = бит категории, у папки/«Мелочи» = объединение поддерева,
       // поэтому единый предикат «есть пересечение с выбранными» покрывает всё.
@@ -149,7 +165,7 @@
       if (hasKids && (n.isDir || n.flags.includes("aggregated"))) {
         out.push({
           ...n,
-          children: filterNodesRec(n.children!, mask, hideAgg),
+          children: filterNodesRec(n.children!, mask, hideAgg, hiddenSet),
         });
       } else {
         out.push(n);
@@ -296,9 +312,7 @@
 
   /** Имя уровня из пути для крошки (последний сегмент, или сам путь). */
   function crumbName(path: string): string {
-    if (!path) return "Демо";
-    const seg = path.split(/[/\\]/).filter(Boolean);
-    return seg.length > 0 ? seg[seg.length - 1] : path;
+    return path ? baseName(path) : "Демо";
   }
 
   /** Загрузить `path` как новый корень мира (старт/после скана/прыжок по крошке
@@ -396,6 +410,20 @@
       rebuildFromFilters();
     });
 
+    // Скрытые узлы (тикет 008) — структурный фильтр: пересобираем город при
+    // изменении набора. Когда возвращать больше нечего, закрываем панель скрытого
+    // (её кнопка в header тоже исчезает при N=0). Первый синхронный вызов
+    // пропускаем — стартовый уровень грузится отдельно ниже.
+    let hiddenFirst = true;
+    const offHidden = hiddenPaths.subscribe((paths) => {
+      if (hiddenFirst) {
+        hiddenFirst = false;
+        return;
+      }
+      if (paths.length === 0) hiddenOpen.set(false);
+      rebuildFromFilters();
+    });
+
     // Смена порога агрегатора → структурная пересборка текущего уровня (с дебаунсом).
     // Первый вызов subscribe — синхронный с текущим значением; стартовый уровень
     // грузится ниже отдельно, поэтому пропускаем его (гард `aggFirst`).
@@ -435,6 +463,12 @@
           break;
         case "refresh":
           void reaggregate();
+          break;
+        case "reroot":
+          void reroot();
+          break;
+        case "toggleHidden":
+          toggleHidden();
           break;
       }
     });
@@ -486,6 +520,7 @@
       offSearch();
       offCategoryFilter();
       offShowAgg();
+      offHidden();
       offAgg();
       offMarks();
       if (aggTimer) clearTimeout(aggTimer);
@@ -506,9 +541,11 @@
 
     statusKind = "none"; // прячем оверлей на время скана
     interaction?.clearSelection();
-    // Новый скан сбрасывает сессионный режим очистки и пометки (vision §I.6/§I.7).
+    // Новый скан сбрасывает сессионный режим очистки, пометки и набор скрытого
+    // (vision §I.6/§I.7 / тикет 008).
     nav?.setCleanup(null);
     clearMarks();
+    clearHidden();
     setCleanupConfirm(false);
     appMode.set({ kind: "scanning", progress: 0 });
     scanProgress.set({
@@ -617,6 +654,34 @@
     handle?.resetView();
   }
 
+  /**
+   * «Сделать эту папку корнем» (тикет 007): жёсткое переоткрытие текущего уровня
+   * как нового корня — стек крошек сбрасывается до него, город перестраивается с
+   * нуля (без бесшовного зума). Гарды дублируют дизейбл кнопки в Header: не на
+   * верхнем уровне и не на синтетическом блоке «Прочее». Смена корня сбрасывает
+   * сессионный набор скрытого (vision §I.6 / тикет 008). */
+  async function reroot() {
+    if ($appMode.kind === "zooming" || !nav) return;
+    const crumbs = $breadcrumbs;
+    if (crumbs.length <= 1) return;
+    const current = crumbs[crumbs.length - 1];
+    if (current.path.endsWith("::<other>")) return;
+    interaction?.clearSelection();
+    clearHidden();
+    const count = await loadRoot(current.path);
+    breadcrumbs.set([{ path: current.path, name: crumbName(current.path) }]);
+    appMode.set({ kind: "idle", path: current.path });
+    statusKind = count === 0 ? "empty" : "none";
+  }
+
+  /** Скрыть узел из визуализации (кнопка «Исключить» в карточке, тикет 008):
+   *  добавить путь в сессионный набор и снять выбор. Пересборку города запускает
+   *  подписчик `hiddenPaths` в onMount. */
+  function hideSelected(path: string) {
+    hideNode(path);
+    interaction?.clearSelection();
+  }
+
   /** «Показать в проводнике» из карточки. Ошибку (нет пути/прав) глушим в лог. */
   async function revealNode(path: string) {
     try {
@@ -665,6 +730,7 @@
           expanded={true}
           onReveal={revealNode}
           onClose={closeCard}
+          onHide={hideSelected}
         />
       {/key}
     </div>

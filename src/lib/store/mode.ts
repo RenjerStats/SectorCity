@@ -290,3 +290,31 @@ export const categoryFilterActive = computed(
  * LOD-превью. Сессионно, держится при навигации.
  */
 export const showAggregate = atom<boolean>(true);
+
+/* ─────────────────────────── скрытые из визуализации узлы ────────────────── */
+
+/**
+ * Стек/список путей узлов, скрытых из визуализации.
+ * При скрытии узла, он убирается из раскладки, и соседние узлы занимают его место.
+ */
+export const hiddenPaths = atom<string[]>([]);
+
+/** Скрыть узел (добавить путь в конец списка, если отсутствует). */
+export function hideNode(path: string): void {
+  const current = hiddenPaths.get();
+  if (!current.includes(path)) {
+    hiddenPaths.set([...current, path]);
+  }
+}
+
+/** Показать скрытый ранее узел (удалить путь из списка). */
+export function unhideNode(path: string): void {
+  const current = hiddenPaths.get();
+  hiddenPaths.set(current.filter((p) => p !== path));
+}
+
+/** Очистить список скрытых узлов. No-op, если он уже пуст (чтобы подписчики не
+ *  пересобирали город на каждом скане, когда скрывать было нечего). */
+export function clearHidden(): void {
+  if (hiddenPaths.get().length > 0) hiddenPaths.set([]);
+}
