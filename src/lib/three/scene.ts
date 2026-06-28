@@ -41,13 +41,18 @@ export interface SceneHandle {
    * Плавно перевести камеру (позиция + цель) за `ms`. Резолвится по прилёте.
    * `onArrive` (если задан) вызывается СИНХРОННО в кадре завершения, до повторного
    * включения контролов и резолва — туда навигатор кладёт rebase (origin shift),
-   * чтобы нормировка координат прошла без видимого кадра «до».
+   * чтобы нормировка координат прошла без видимого кадра «до». `onProgress` (если
+   * задан) зовётся КАЖДЫЙ кадр твина с СЫРЫМ прогрессом `p∈[0,1]` (без сглаживания —
+   * easing к камере применяется здесь же): туда навигатор вешает сопутствующие
+   * анимации drill/up (затемнение периметра, снятие купола), чтобы они занимали ровно
+   * тот же отрезок, что и зум.
    */
   flyTo(
     position: Vector3,
     target: Vector3,
     ms: number,
     onArrive?: () => void,
+    onProgress?: (p: number) => void,
   ): Promise<void>;
   /** Жёстко поставить камеру (позиция + цель) и обновить контролы. */
   placeCamera(position: Vector3, target: Vector3): void;
@@ -152,7 +157,7 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
       frameCallbacks.add(cb);
       return () => frameCallbacks.delete(cb);
     },
-    flyTo(position, target, ms, onArrive) {
+    flyTo(position, target, ms, onArrive, onProgress) {
       return new Promise((resolve) => {
         // На время перелёта глушим пользовательский ввод, чтобы не драться с твином.
         controls.enabled = false;
@@ -161,10 +166,14 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
         const t = { p: 0 };
         new Tween(t, tweens)
           .to({ p: 1 }, ms)
-          .easing(Easing.Cubic.InOut)
+          // Easing применяем ВРУЧНУЮ к камере (Cubic.InOut, как раньше) — чтобы в
+          // `onProgress` отдать СЫРОЙ прогресс: сопутствующие анимации навигатора
+          // ведут собственные кривые, но на том же отрезке времени.
           .onUpdate(() => {
-            camera.position.lerpVectors(camFrom, position, t.p);
-            controls.target.lerpVectors(tgtFrom, target, t.p);
+            const e = Easing.Cubic.InOut(t.p);
+            camera.position.lerpVectors(camFrom, position, e);
+            controls.target.lerpVectors(tgtFrom, target, e);
+            onProgress?.(t.p);
           })
           .onComplete(() => {
             // rebase идёт ДО повторного включения контролов и резолва, в этом же

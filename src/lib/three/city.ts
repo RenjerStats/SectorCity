@@ -4,9 +4,13 @@
  *
  * Уровень строится КАНОНИЧЕСКИ: squarified-treemap (`d3-hierarchy`) в прямо-
  * угольнике аспекта своего владельца (нормированном так, что бо́льшая сторона =
- * `CITY_SPAN`), сцентрированный около начала координат. Так как squarify
- * scale-инвариантен, превью района = равномерно уменьшенная копия этого же
- * района «как самостоятельного уровня». Это и делает drill дешёвым: размещение
+ * `CITY_SPAN`), сцентрированный около начала координат. squarify scale-инвариантен
+ * ТОЛЬКО при нулевом padding, поэтому партицию считаем без padding, а зазоры/дороги
+ * наносим косметически — долей размера (`applyCosmeticGaps`); иначе абсолютный
+ * padding на разном масштабе менял бы форму/ориентацию папок при drill (squarify
+ * жадный, и его вход искажался разной долей padding). Тогда превью района =
+ * равномерно уменьшенная копия этого же района «как самостоятельного уровня». Это
+ * и делает drill дешёвым: размещение
  * уровня в прямоугольник района — честная similarity `G(local)=s·local+C`
  * (см. `navigator.ts`), а промоут «купол → активный уровень» — пиксель-в-пиксель
  * по домикам (анимируется только снятие стекла, §II.3.6).
@@ -15,16 +19,21 @@
  *
  * Сущности рендера (vision §II.3):
  *   - «здание» = файл/лист: высота=устаревание (mtime), цвет=категория;
- *   - «папка» = купол: полуматовый стеклянный `RoundedBox` (нейтральный, монохром)
- *     + металлический ободок-основание. Внутри — реальная застройка (на глубине
- *     +1) либо четыре серых куба-заглушки (на глубине +2, купол-«теплица»).
+ *   - «папка» = постамент: плита-основание (`RoundedBox`), которая И обводит папку
+ *     («поребрик» чуть шире содержимого), И служит ПОЛОМ — содержимое папки стоит
+ *     на её верхней грани, поэтому ничего не тонет в плите. У прямого ребёнка (+1)
+ *     поверх плиты ещё полуматовый стеклянный купол. Плита металлическая на +1/+2 и
+ *     матовая на +3 (детализация по глубине).
+ *
+ * Постаменты СТЕКАЮТСЯ: плита вложенной папки стоит на полу родителя, её содержимое
+ * — на её верхней грани. Так плита +2 не тонет в плите +1 (был баг: рамку +2 не
+ * видно — она проваливалась в металлическое основание +1).
  *
  * Детализация по ГЛУБИНЕ, не по расстоянию до камеры (§II.3.2 — заменяет прежний
- * гистерезис `NEAR_ENTER`/`NEAR_EXIT`): прямые дети текущей папки (+1) — полно-
- * ценные купола с настоящими домиками; папки внутри них (+2) — купола-заглушки с
- * серыми кубами. Облик папки не «дышит» от движения камеры — предсказуемее и
- * точнее ложится на метафору «обособленный контейнер». `updateLOD` поэтому пуст
- * (оставлен для совместимости API: навигатор/тесты зовут его покадрово).
+ * гистерезис `NEAR_ENTER`/`NEAR_EXIT`): прямые дети текущей папки (+1) — купола с
+ * настоящими домиками; папки внутри них (+2/+3) — постаменты с застройкой. Облик
+ * папки не «дышит» от движения камеры. `updateLOD` поэтому пуст (оставлен для
+ * совместимости API: навигатор/тесты зовут его покадрово).
  *
  * Высоты вложенных превью (+1) масштабируются footprint-scale района
  * (`s_D = max(w,d)/CITY_SPAN`): при промоуте в активный уровень превью и активный
@@ -49,7 +58,6 @@ import {
   MeshStandardMaterial,
   Object3D,
   PlaneGeometry,
-  Vector3,
 } from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { hierarchy, treemap, treemapSquarify } from "d3-hierarchy";
@@ -62,20 +70,30 @@ import {
   GLASS_COLOR,
   GLASS_ROUGHNESS,
   GROUND_COLOR,
-  STUB_COLOR,
 } from "./palette";
 import { layoutToWorld, type TreemapRect } from "./layoutToWorld";
 
 /** Каноническая сторона уровня-владельца (мировые единицы): бо́льшая сторона. */
 export const CITY_SPAN = 200;
 /**
- * Зазор-«дорога» МЕЖДУ районами (широкий) и зазор между домами ВНУТРИ района
- * (плотный). Депт-зависимый padding: дороги читаются как разметка, а застройка
- * внутри купола остаётся плотной (vision §II.3.4). Дорога должна вмещать ~2 шага
- * dot-grid (`ROAD_DOT_CELL`), иначе сетка выглядит как набор точек, а не улица.
+ * Зазоры наносятся КОСМЕТИЧЕСКИ — долей от размера прямоугольника, ПОСЛЕ squarify
+ * (`applyCosmeticGaps`), а не через padding d3. Почему: squarify scale-инвариантен
+ * только при НУЛЕВОМ padding, а абсолютный padding d3 запекается во вход алгоритма
+ * (`positionNode`) и на разном масштабе (превью района ↔ он же как активный уровень
+ * после drill) даёт разный аспект → разные жадные решения → папки меняли форму/
+ * ориентацию при drill. Партицию считаем с нулевым padding (одна на любом масштабе),
+ * зазор — ужатием прямоугольника к ЦЕНТРУ на долю (аспект сохраняется → партиция
+ * цела).
+ *
+ * Доля ОДНА на всех уровнях (и внутри куполов) — НЕ зависит от LOD-глубины. Это
+ * делает drill чистым зумом: содержимое папки имеет тот же относительный зазор и
+ * как превью под стеклом (+2), и как активный уровень (+1), поэтому при входе оно
+ * не «переразъезжается» (раньше +2 был плотным `0.03`, а на drill становился `0.11`
+ * → дома ужимались, освобождая «дороги»). Платой за бесшовность идёт layout-различие
+ * «широкая дорога vs плотный квартал» — его планируем вернуть РЕНДЕРОМ дорог (бордюры
+ * у активных +1), а не раскладкой. Значение — один регулятор плотности, можно крутить.
  */
-const ROAD_WIDTH = 9;
-const BUILDING_GAP = 0.6;
+const GAP_FRAC = 0.06; // единая доля-зазор между соседями на любой глубине
 /**
  * Дороги — точечные «бордюры» вокруг блоков (точки из геометрии раскладки, не из
  * мировой решётки): по периметру каждого блока, равномерно вдоль стороны, с
@@ -93,14 +111,12 @@ const GROUND_EDGE_COLOR = 0x080808; // = --bg: к нему гаснут земл
 const APRON_STEP = 6; // шаг сетки-поля вокруг города
 const APRON_DOT_ALPHA = 0.12; // базовая яркость точки поля (до угасания)
 /**
- * Внешний отступ детей от рамки района. Должен быть БОЛЬШЕ `DOME_FOOTPRINT_INSET`:
- * разница = зазор между застройкой и стеклом купола. Без зазора домики у самой
- * стенки не размываются (transmission блюрит по экранному смещению ≈ глубине за
- * стеклом) и могут «протыкать» стекло, ломая буфер глубины (vision §II.3.7).
+ * Внешний отступ содержимого от рамки контейнера — доля размера (роль прежнего
+ * `DISTRICT_PAD`). Это и рим/«крыша» района, и у +1 — обязательный зазор застройка↔
+ * стекло купола (с запасом над `DOME_FOOTPRINT_INSET`, иначе домики у стенки не
+ * размываются transmission'ом и протыкают стекло, ломая буфер глубины, §II.3.7).
  */
-const DISTRICT_PAD = 3.0;
-/** Верхняя полоса района (рамка/«крыша») сверх внешнего отступа. */
-const DISTRICT_PAD_TOP = 2.5;
+const CONTENT_MARGIN_FRAC = 0.05;
 /** Диапазон высоты здания (устаревание), мировые единицы. */
 const MIN_HEIGHT = 4;
 const MAX_HEIGHT = 70;
@@ -111,27 +127,46 @@ const MIN_VALUE = 1;
 /** Множитель затемнения несовпадающих с фильтром/поиском узлов (подсветка). */
 export const DIM_FACTOR = 0.12;
 
-/** Высота металлического ободка-основания купола (тонкий постамент), мир. */
-const RING_HEIGHT = 2.2;
-/** Вынос ободка наружу за грань купола — «поребрик» выступает из-под стекла. */
+/**
+ * Высота базовой плиты-постамента папки (мир). Плита — это И обводка-«поребрик»
+ * (footprint чуть больше содержимого), И ПОЛ: содержимое папки ставится на её
+ * верх, поэтому ничего не тонет в плите (vision §II.3.1). У +1 — фикс `RING_HEIGHT`
+ * (как исторический металлический ободок); у вложенных папок высота масштабируется
+ * footprint-scale (мелкая папка — пропорционально тоньше постамент), с полом
+ * `BASE_MIN_HEIGHT`, иначе её плита тонула бы в плите родителя.
+ */
+export const RING_HEIGHT = 2.2;
+const BASE_MIN_HEIGHT = 0.6; // пол высоты постамента вложенной папки
+/** Вынос постамента +1 наружу за грань купола — «поребрик» выступает из-под стекла. */
 const RING_RIM = 1.0;
 /**
  * Купол охватывает свою застройку с запасом-«воздухом» сверху (§II.3.5: высота
  * самого купола — производная, величину НЕ кодирует). Footprint купола слегка
- * утоплен внутрь рамки района, чтобы металлический ободок выступал «поребриком».
+ * утоплен внутрь плиты-постамента, чтобы он выступал «поребриком».
  */
 const DOME_AIR = 8; // запас над самым высоким домиком (зазор «застройка↔стекло»)
 const DOME_MIN_HEIGHT = 9; // минимальная высота купола (тощие папки читаемы)
-const DOME_FOOTPRINT_INSET = 0.8; // насколько footprint купола уже рамки района
+const DOME_FOOTPRINT_INSET = 0.8; // насколько footprint купола уже плиты района
 /** Скруглённый стеклянный куб: радиус скругления и сегменты на единичном боксе. */
 const DOME_ROUND_RADIUS = 0.06;
 const DOME_ROUND_SEGMENTS = 3;
+/**
+ * Анимация снятия купола при drill (и обратного «надевания» при up, §II.3.6):
+ * купол раскрываемого района уезжает вверх и растворяется ЗА ВЕСЬ отрезок зума
+ * (`extractDome`). На сколько своих высот он уходит и кривые подъёма/растворения —
+ * подобраны «не сухими» (нелинейными): подъём — easeOutCubic (резвый старт, мягкое
+ * замедление), растворение — smoothstep на хвосте отрезка (держит стекло читаемым,
+ * затем плавно в ноль — «плавное исчезновение в конце»).
+ */
+const DOME_LIFT_FACTOR = 1.1; // подъём на 110 % собственной высоты купола
+const DOME_FADE_START = 0.25; // доля отрезка, после которой стекло начинает таять
 
-/** «Теплица» на +2: серые кубы-заглушки (без своей стеклянной оболочки). */
-const STUB_CANON_HEIGHT = 12; // высота серого куба-заглушки (до footprint-scale)
-/** Относительные высоты четырёх кубов — «четыре разных серых куба» (§II.3.2). */
-const STUB_HEIGHT_RATIOS = [1.0, 0.7, 0.85, 0.55];
-const STUB_GAP = 0.18; // доля зазора между кубами в footprint теплицы
+/**
+ * Срез глубины превью (d3-глубина уровня): контейнеры до этой глубины несут
+ * реальную застройку. Реальное содержимое до +2, маркеры-постаменты — на +3 (для
+ * этого фронт запрашивает `get_level(depth = 3)`).
+ */
+export const PREVIEW_MAX_DEPTH = 3;
 
 /** Притушенный серый материал декора (контекст-родитель). */
 const DECOR_GRAY = 0.35;
@@ -142,13 +177,20 @@ export interface LevelSpan {
   d: number;
 }
 
-/** Размещение дочернего района: similarity `G(local)=s·local+C` (C.y=0). */
+/** Размещение дочернего района: similarity `G(local)=s·local+C` (C=(cx,cy,cz)). */
 export interface Placement {
   /** Равномерный масштаб (footprint района / канонический размах). */
   s: number;
-  /** Центр прямоугольника района в координатах ЭТОГО уровня. */
+  /** Центр прямоугольника района в координатах ЭТОГО уровня (X/Z). */
   cx: number;
   cz: number;
+  /**
+   * Y-отметка пола содержимого района (верх его плиты-постамента) в координатах
+   * ЭТОГО уровня = `C.y`. Делает drill бесшовным по вертикали: активный (пол `y=0`)
+   * под `G` встаёт ровно на превью (сидящее на плите на высоте `cy`), а декор под
+   * `G⁻¹` уходит на стопку плит вниз (слоёный пирог, план §8). См. `transform.ts`.
+   */
+  cy: number;
   /** Размеры прямоугольника района (для канонического span дочернего уровня). */
   w: number;
   d: number;
@@ -184,6 +226,19 @@ export interface CityView {
 }
 
 /**
+ * Анимируемый «снятый» купол (план/vision §II.3.6): отдельный полупрозрачный меш,
+ * замещающий инстанс купола района на время твина зума. Навигатор гонит `setProgress`
+ * синхронно с камерой (`0` — купол на месте/непрозрачен, `1` — снят вверх/прозрачен),
+ * а по прилёте зовёт `dispose`. См. `Level.extractDome`.
+ */
+export interface DrillDome {
+  /** `0` — купол сидит на месте и непрозрачен; `1` — поднят и растворён. */
+  setProgress(p: number): void;
+  /** Убрать временный меш и освободить его geometry/material. */
+  dispose(): void;
+}
+
+/**
  * Уровень города — самостоятельная `Group` с канонической раскладкой. Размещение
  * в мир (в прямоугольник района родителя) задаётся трансформом группы извне
  * (`navigator.ts`). Активный уровень рисуется полностью и кликабелен; декор —
@@ -203,13 +258,56 @@ export interface Level {
   childPlacement(path: string): Placement | null;
   /**
    * Переключить облик: декор (притушено, без пикинга). `excludePath` — район,
-   * ставший активным уровнем: его купол и вся застройка ОБЯЗАТЕЛЬНО скрываются,
-   * иначе после `G⁻¹` они раздуваются в начало координат и накрывают активный
-   * уровень (был баг «после drill вся папка — один блок»).
+   * ставший активным уровнем: его КУПОЛ и вся ЗАСТРОЙКА скрываются (их несёт активный
+   * уровень — иначе после `G⁻¹` они накрыли бы его, был баг «после drill вся папка —
+   * один блок»), но его ПЛИТА-постамент ОСТаётся: на неё «садится» активный уровень
+   * (слоёный пирог, план §8). Плита стоит на своём каноническом месте — нужный
+   * вертикальный сдвиг даёт трансформ-подобие группы (`G⁻¹` с `cy`, см. `transform.ts`),
+   * репозиционировать плиту вручную больше не нужно. `budget` — LOD-бюджет глубины
+   * (план §4): инстансы глубиной d3 > `budget` скрываются; по умолчанию полный
+   * (`PREVIEW_MAX_DEPTH`). `dim` — начальный множитель затемнения (§7.1; по умолчанию
+   * `DECOR_GRAY`).
    */
-  setDecor(excludePath?: string): void;
+  setDecor(excludePath?: string, budget?: number, dim?: number): void;
+  /**
+   * Сменить LOD-бюджет уже-декорного уровня без пересборки (план §4): при drill/up
+   * слой меняет позицию в стеке `k`, и его бюджет `b_k` пересчитывается — это
+   * обратимое скрытие/возврат инстансов по `d3depth`. No-op вне декор-облика.
+   */
+  setDecorBudget(budget: number): void;
+  /**
+   * Покадрово сменить множитель затемнения декора (план §7.1): `1` — полный цвет,
+   * ниже — плавно в фон. Только перекраска material'ов (без матриц) — для кросс-фейда
+   * градиента по `S_k`. No-op вне декор-облика.
+   */
+  setDecorDim(dim: number): void;
+  /**
+   * Показать/скрыть землю-«пол» этого уровня (план §8). Навигатор держит видимой
+   * РОВНО ОДНУ землю — у самого дальнего уровня стопки: его `G⁻¹`-рибейз кладёт её
+   * под низ всего «слоёного пирога», поэтому плиты не ныряют под землю активного.
+   * Бесшовно: дальняя земля рибейзится тем же подобием, что и камера. `applyActive`/
+   * `applyDecor` ставят дефолт (активный — видна, декор — нет), навигатор переопределяет.
+   */
+  setGroundShown(visible: boolean): void;
   /** Переключить облик: активный (полный рендер + пикинг). */
   setActive(): void;
+  /**
+   * Снять купол района `path` в отдельный анимируемый меш (план/vision §II.3.6):
+   * инстанс купола в общем меше скрывается, возвращается ручка `DrillDome`, чей
+   * `setProgress` навигатор гонит синхронно с твином зума (купол уезжает вверх и
+   * тает), а по прилёте — `dispose`. `null`, если у района нет купола (не прямой
+   * ребёнок +1). Меш живёт в `group` уровня, поэтому корректно следует за его
+   * трансформом-подобием (и в активном, и в декор-облике).
+   */
+  extractDome(path: string): DrillDome | null;
+  /**
+   * Затемнение «на входе» (drill): за время зума периметр уровня плавно уходит в
+   * декор-цвет (`factor`: `1` — полный цвет, ниже — к фону), а раскрываемое поддерево
+   * `excludePath` ОСТаётся ярким (его подхватит новый активный уровень — без «прыжка»
+   * яркости в центре кадра). Только per-instance цвет (без матриц); на свопе владелец
+   * возвращает базовые цвета и ставит итоговый декор-облик. No-op-безопасно вне зума.
+   */
+  setEnterDim(excludePath: string, factor: number): void;
   /**
    * Подсветка-фильтр (vision §I.4б): несовпадающие с предикатом узлы гасятся
    * домножением per-instance цвета на `DIM_FACTOR`, совпадающие остаются в полном
@@ -234,19 +332,26 @@ export interface Level {
   dispose(): void;
 }
 
-/** Накопитель купола-района при раскладке (до постройки мешей). */
+/** Накопитель папки-района при раскладке (до постройки мешей). */
 interface DistrictAcc {
   node: ScanNode;
   rect: TreemapRect;
-  center: Vector3;
   /** footprint-scale района: max(w,d)/CITY_SPAN (масштаб вложенных высот). */
   footprintScale: number;
-  /** Глубина относительно текущей папки: 1 (+1, реальные домики) или 2 (+2, заглушка). */
-  depth: 1 | 2;
-  /** Для +2: индекс родительского +1-купола в `districts` (для исключения в декоре). */
+  /** d3-глубина в раскладке уровня (1 = прямой ребёнок текущей папки). */
+  d3depth: number;
+  /** Индекс БЛИЖАЙШЕГО объемлющего района в `districts` (для стопки/декора), либо `null`. */
   parentIdx: number | null;
-  /** Самый высокий внутренний элемент (домик/купол-теплица) — высота купола = он + воздух. */
-  maxChildHeight: number;
+  /** Индекс района d3-глубины 1 (цель drill за один шаг); для самого +1 — он сам. */
+  topIdx: number;
+  /** Высота плиты-постамента этой папки (мир). */
+  baseHeight: number;
+  /** Низ плиты-постамента (мир): пол родителя (`contentFloor` предка) или 0 у +1. */
+  floorY: number;
+  /** Верх плиты = пол для содержимого ЭТОЙ папки (`floorY + baseHeight`). */
+  contentFloor: number;
+  /** Самая высокая абсолютная отметка содержимого+плиты поддерева (для высоты купола). */
+  maxTopY: number;
 }
 
 /** Накопитель здания при раскладке. */
@@ -254,13 +359,86 @@ interface BuildingAcc {
   node: ScanNode;
   rect: TreemapRect;
   height: number;
-  /** Индекс +1-купола-владельца в `districts` (вложенный домик), либо `null` (файл верхнего уровня). */
+  /** Индекс БЛИЖАЙШЕГО купола-владельца в `districts` (вложенный домик), либо `null` (файл верхнего уровня). */
   districtIdx: number | null;
+  /** Индекс купола d3-глубины 1 (цель drill), либо `null` (файл верхнего уровня). */
+  topDistrictIdx: number | null;
 }
 
 /** Контейнер = папка ИЛИ блок-агрегат «Мелочь» (навигируемый купол). */
 function isContainer(node: ScanNode): boolean {
   return node.isDir || node.flags.includes("aggregated");
+}
+
+/** Минимум, что нужно `applyCosmeticGaps` от d3-узла (мутирует прямоугольник). */
+interface RectNode {
+  depth: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  children?: RectNode[];
+}
+
+/**
+ * Косметические зазоры ПОСЛЕ squarify (см. шапку и `GAP_FRAC_*`): рекурсивно
+ * сверху вниз, IN PLACE переписывает `x0/y0/x1/y1`. Для каждого контейнера:
+ *   1) содержимое отступает от рамки на `CONTENT_MARGIN_FRAC` (рим/«крыша», зазор
+ *      под стекло купола) — подобие frame → контент-область (sx == sy, аспекты
+ *      равны, т.к. все шаги — подобия);
+ *   2) каждый сосед ужимается к своему центру на долю-зазор по глубине (дорога у
+ *      +1, плотно глубже) — это тоже подобие, аспект цел → партиция squarify не
+ *      трогается.
+ * Поскольку ВСЕ преобразования — подобия, превью района попиксельно совпадает с
+ * ним же как активным уровнем, уменьшенным `G` (drill бесшовен, навигатор).
+ *
+ * `frame` — ИСХОДНЫЙ (нулевой-padding) прямоугольник узла, в котором его дети были
+ * затайлены squarify; передаётся явно, т.к. собственный rect узла к моменту
+ * обработки уже ужат родителем.
+ */
+function applyCosmeticGaps(node: RectNode, frame: RectNode): void {
+  const kids = node.children;
+  if (!kids || kids.length === 0) return;
+
+  // Контент-область узла: его (уже ужатый) rect, отступив рим долей размера.
+  const w = node.x1 - node.x0;
+  const h = node.y1 - node.y0;
+  const cx0 = node.x0 + w * CONTENT_MARGIN_FRAC;
+  const cy0 = node.y0 + h * CONTENT_MARGIN_FRAC;
+  const cx1 = node.x1 - w * CONTENT_MARGIN_FRAC;
+  const cy1 = node.y1 - h * CONTENT_MARGIN_FRAC;
+  // Подобие frame → контент-область (sx == sy: аспекты равны).
+  const sx = (cx1 - cx0) / (frame.x1 - frame.x0);
+  const sy = (cy1 - cy0) / (frame.y1 - frame.y0);
+
+  for (const c of kids) {
+    // Исходный (нулевой-padding) rect ребёнка — запомнить ДО перезаписи: станет
+    // frame для его собственной рекурсии (его дети затайлены именно в нём).
+    const ox0 = c.x0;
+    const oy0 = c.y0;
+    const ox1 = c.x1;
+    const oy1 = c.y1;
+    // Отобразить в контент-область родителя.
+    const nx0 = cx0 + (ox0 - frame.x0) * sx;
+    const ny0 = cy0 + (oy0 - frame.y0) * sy;
+    const nx1 = cx0 + (ox1 - frame.x0) * sx;
+    const ny1 = cy0 + (oy1 - frame.y0) * sy;
+    // Зазор между соседями: ужать к центру единой долей (аспект сохраняется).
+    // Доля одна на любой глубине → drill бесшовен (см. шапку `GAP_FRAC`).
+    const gx = (nx1 - nx0) * (GAP_FRAC / 2);
+    const gy = (ny1 - ny0) * (GAP_FRAC / 2);
+    c.x0 = nx0 + gx;
+    c.y0 = ny0 + gy;
+    c.x1 = nx1 - gx;
+    c.y1 = ny1 - gy;
+    applyCosmeticGaps(c, {
+      depth: c.depth,
+      x0: ox0,
+      y0: oy0,
+      x1: ox1,
+      y1: oy1,
+    });
+  }
 }
 
 /**
@@ -275,13 +453,14 @@ function layoutNested(
   span: LevelSpan,
   nowSeconds: number,
 ): { districts: DistrictAcc[]; buildings: BuildingAcc[] } {
-  // Раскладку обрезаем на глубине +2: прямые дети (+1) несут свою застройку, а
-  // папки внутри них (+2) становятся листьями-«теплицами» (стекло + серые кубы),
-  // их реальных детей в раскладку НЕ тянем (§II.3.2). `depth`: дети текущей папки
-  // приходят как 1, их дети — 2; глубже не идём.
+  // Раскладку обрезаем на `PREVIEW_MAX_DEPTH`: контейнеры до среза несут реальную
+  // застройку, а контейнеры-ЛИСТЬЯ на срезе (детей в раскладку не тянем) станут
+  // куполами-«теплицами» с серыми кубами. `depth`: дети текущей папки приходят
+  // как 1, их дети — 2 и т.д. Данные глубже среза должен прислать `get_level`
+  // (иначе у узла пустой `children` → он и так лист-«теплица»).
   const toDatum = (node: ScanNode, depth: number): TreeDatum => {
     const kids = node.children;
-    return kids && kids.length > 0 && depth < 2
+    return kids && kids.length > 0 && depth < PREVIEW_MAX_DEPTH
       ? { node, children: kids.map((k) => toDatum(k, depth + 1)) }
       : { node };
   };
@@ -295,14 +474,13 @@ function layoutNested(
   );
 
   // treemap() добавляет x0/y0/x1/y1 — итерируем именно прямоугольный результат.
+  // Партицию считаем БЕЗ padding (по умолчанию у d3 он нулевой): squarify тогда
+  // scale-инвариантен → превью района = он же как активный уровень, уменьшенный
+  // подобием (drill не меняет форм). Зазоры/дороги/рим — косметически, ПОСЛЕ.
   const laidOut = treemap<TreeDatum>()
     .tile(treemapSquarify)
-    .size([span.w, span.d])
-    // Депт-зависимый зазор: корень (между районами) — широкая дорога; район
-    // (между его домами) — плотная застройка.
-    .paddingInner((node) => (node.depth === 0 ? ROAD_WIDTH : BUILDING_GAP))
-    .paddingOuter(DISTRICT_PAD)
-    .paddingTop(DISTRICT_PAD_TOP)(root);
+    .size([span.w, span.d])(root);
+  applyCosmeticGaps(laidOut, laidOut);
 
   const halfW = span.w / 2;
   const halfD = span.d / 2;
@@ -317,85 +495,115 @@ function layoutNested(
   const buildings: BuildingAcc[] = [];
   const districtIdxByNode = new Map<ScanNode, number>();
 
-  // descendants(): pre-order (родитель раньше детей) — купол заводим до его
+  /** Индекс ближайшего объемлющего купола (по уже занесённым предкам), либо `null`. */
+  const nearestContainerIdx = (
+    d: { ancestors(): { data: { node?: ScanNode } }[] },
+    self: unknown,
+  ): number | null => {
+    for (const a of d.ancestors()) {
+      if (a === self) continue; // сам узел — не предок
+      const an = a.data.node;
+      if (an && districtIdxByNode.has(an)) return districtIdxByNode.get(an)!;
+    }
+    return null;
+  };
+
+  // descendants(): pre-order (родитель раньше детей) — район заводим до его
   // вложенного содержимого, чтобы те нашли индекс владельца и его footprint-scale.
   for (const d of laidOut.descendants()) {
     const node = d.data.node;
     if (!node) continue; // синтетический корень
     const rect = center(d);
+    const c = layoutToWorld(rect, 0);
+    const footprintScale = Math.max(c.width, c.depth) / CITY_SPAN;
 
-    if (d.depth === 1 && isContainer(node)) {
-      // +1 купол: прямой ребёнок текущей папки → полноценная застройка внутри.
-      const c = layoutToWorld(rect, 0);
+    if (isContainer(node)) {
+      const parentIdx = nearestContainerIdx(d, d);
       const idx = districts.length;
       districtIdxByNode.set(node, idx);
+      const topIdx =
+        d.depth === 1
+          ? idx
+          : parentIdx !== null
+            ? districts[parentIdx].topIdx
+            : idx;
+      // Высота плиты-постамента: фикс у +1, масштабируется footprint-scale у вложенных
+      // (с полом). `floorY`/`contentFloor` досчитаем стопкой сверху вниз ниже.
+      const baseHeight =
+        d.depth === 1
+          ? RING_HEIGHT
+          : Math.max(BASE_MIN_HEIGHT, RING_HEIGHT * footprintScale);
       districts.push({
         node,
         rect,
-        center: new Vector3(c.centerX, 0, c.centerZ),
-        footprintScale: Math.max(c.width, c.depth) / CITY_SPAN,
-        depth: 1,
-        parentIdx: null,
-        maxChildHeight: 0,
-      });
-    } else if (d.depth === 2 && isContainer(node)) {
-      // +2 «теплица»: папка внутри папки → только серые кубы-заглушки (без своей
-      // стеклянной оболочки — иначе она рендерилась бы поверх стекла родителя
-      // чётко). Высота кубов фиксирована под scale; они под «крышей» родителя.
-      const c = layoutToWorld(rect, 0);
-      const parentIdx =
-        d.ancestors().reduce<number | null>((acc, a) => {
-          if (acc !== null) return acc;
-          const an = a.data.node;
-          return an && a.depth === 1
-            ? (districtIdxByNode.get(an) ?? null)
-            : acc;
-        }, null) ?? null;
-      const parentScale =
-        parentIdx !== null ? districts[parentIdx].footprintScale : 1;
-      const stubH = STUB_CANON_HEIGHT * parentScale; // самый высокий куб-заглушка
-      districts.push({
-        node,
-        rect,
-        center: new Vector3(c.centerX, 0, c.centerZ),
-        footprintScale: Math.max(c.width, c.depth) / CITY_SPAN,
-        depth: 2,
+        footprintScale,
+        d3depth: d.depth,
         parentIdx,
-        maxChildHeight: stubH,
+        topIdx,
+        baseHeight,
+        floorY: 0,
+        contentFloor: 0,
+        maxTopY: 0,
       });
-      // Кубы-заглушки должны помещаться под «крышей» родительского +1 купола.
-      if (parentIdx !== null) {
-        districts[parentIdx].maxChildHeight = Math.max(
-          districts[parentIdx].maxChildHeight,
-          stubH,
-        );
-      }
     } else {
-      // Лист-файл: здание верхнего уровня (+0) или вложенный домик (+1, внутри купола).
-      let districtIdx: number | null = null;
-      let scale = 1;
-      if (d.depth === 2) {
-        const ancestor = d.ancestors().find((a) => a.depth === 1)?.data.node;
-        districtIdx = (ancestor && districtIdxByNode.get(ancestor)) ?? null;
-        if (districtIdx !== null) scale = districts[districtIdx].footprintScale;
-      }
+      // Лист-файл: здание верхнего уровня (+0) или вложенный домик (внутри района).
+      const districtIdx = nearestContainerIdx(d, d);
+      const scale =
+        districtIdx !== null ? districts[districtIdx].footprintScale : 1;
+      const topDistrictIdx =
+        districtIdx !== null ? districts[districtIdx].topIdx : null;
       const height = heightFromMtime(node.mtime, nowSeconds) * scale;
-      buildings.push({ node, rect, height, districtIdx });
-      if (districtIdx !== null) {
-        districts[districtIdx].maxChildHeight = Math.max(
-          districts[districtIdx].maxChildHeight,
-          height,
-        );
-      }
+      buildings.push({ node, rect, height, districtIdx, topDistrictIdx });
+    }
+  }
+
+  // Стопка постаментов СВЕРХУ ВНИЗ (по возрастанию d3-глубины): плита папки стоит на
+  // полу родителя (`contentFloor` предка), а её верх — пол для её содержимого. Так
+  // вложенная плита не тонет в плите родителя.
+  const byDepthAsc = districts
+    .map((_, i) => i)
+    .sort((a, b) => districts[a].d3depth - districts[b].d3depth);
+  for (const i of byDepthAsc) {
+    const d = districts[i];
+    d.floorY = d.parentIdx !== null ? districts[d.parentIdx].contentFloor : 0;
+    d.contentFloor = d.floorY + d.baseHeight;
+    d.maxTopY = d.contentFloor; // пустой постамент достаёт хотя бы до своего верха
+  }
+
+  // Высшая отметка содержимого каждого района: домики поднимают «свой» район,
+  // затем снизу вверх (по убыванию глубины) поддеревья поднимают предков. Нужна для
+  // высоты купола +1 (он обязан накрыть всё поднятое содержимое).
+  for (const b of buildings) {
+    if (b.districtIdx !== null) {
+      const d = districts[b.districtIdx];
+      d.maxTopY = Math.max(d.maxTopY, d.contentFloor + b.height);
+    }
+  }
+  const byDepthDesc = districts
+    .map((_, i) => i)
+    .sort((a, b) => districts[b].d3depth - districts[a].d3depth);
+  for (const i of byDepthDesc) {
+    const d = districts[i];
+    if (d.parentIdx !== null) {
+      districts[d.parentIdx].maxTopY = Math.max(
+        districts[d.parentIdx].maxTopY,
+        d.maxTopY,
+      );
     }
   }
 
   return { districts, buildings };
 }
 
-/** Высота купола из самого высокого внутреннего элемента + запас-«воздух». */
+/**
+ * Высота стеклянного купола +1: накрывает самую высокую отметку поднятого содержимого
+ * (`maxTopY`, абсолютная от земли) с запасом-«воздухом». Воздух и минимум
+ * масштабируются footprint-scale (мелкие купола — пропорционально меньший зазор,
+ * иначе абсолютный `DOME_AIR` превращал бы их в тонкие шпили).
+ */
 function domeHeight(d: DistrictAcc): number {
-  return Math.max(DOME_MIN_HEIGHT, d.maxChildHeight + DOME_AIR);
+  const s = Math.min(1, d.footprintScale);
+  return Math.max(DOME_MIN_HEIGHT * s, d.maxTopY + DOME_AIR * s);
 }
 
 /** Высота из устаревания: чем старше mtime, тем выше (канал «устаревание»). */
@@ -433,10 +641,11 @@ function ringBaseColor(node: ScanNode): number {
  * `span`). Группа создаётся в identity — размещение в мир задаёт навигатор.
  *
  * Меши уровня:
- *   - `buildingMesh` — файлы (верхнего уровня + вложенные домики +1);
- *   - `domeMesh`     — стеклянные купола папок (прозрачный проход, §II.3.7);
- *   - `ringMesh`     — металлические ободки-основания куполов;
- *   - `stubMesh`     — серые кубы-заглушки в куполах-теплицах +2.
+ *   - `buildingMesh` — файлы (верхнего уровня + вложенные домики);
+ *   - `domeMesh`     — матовые стеклянные купола папок +1 (transmission, §II.3.7);
+ *   - `ringMesh`     — металлические ободки-основания куполов +1;
+ *   - `volumeMesh`   — непрозрачные объёмы-«пузыри» вложенных папок БЕЗ прямых файлов;
+ *   - `frameMesh`    — периметральные рамки-ободки вложенных папок С файлами.
  */
 export function buildLevel(
   nodes: ScanNode[],
@@ -453,7 +662,10 @@ export function buildLevel(
   const ground = makeFadedGround(span);
   group.add(ground);
   const roadDots = buildRoadDots(span, districts, buildings);
-  group.add(roadDots);
+  // ВРЕМЕННО: отрисовка точек-дорог отключена (отладка плотности/шва). Меш
+  // по-прежнему строится и переключается visible в декоре/активном, просто не
+  // добавлен в группу. Вернуть — раскомментировать строку ниже.
+  // group.add(roadDots);
 
   const dummy = new Object3D();
   const color = new Color();
@@ -476,15 +688,19 @@ export function buildLevel(
     );
     buildings.forEach((b, i) => {
       const box = layoutToWorld(b.rect, b.height);
-      dummy.position.set(box.centerX, box.height / 2, box.centerZ);
+      // Домик стоит на ПОЛУ своей папки (верх её плиты-постамента), а не на земле —
+      // иначе он провалился бы в плиту. Файл верхнего уровня сидит на земле (floor=0).
+      const floor =
+        b.districtIdx !== null ? districts[b.districtIdx].contentFloor : 0;
+      dummy.position.set(box.centerX, floor + box.height / 2, box.centerZ);
       dummy.scale.set(box.width, box.height, box.depth);
       dummy.updateMatrix();
       buildingReal[i] = dummy.matrix.clone();
       buildingMesh!.setMatrixAt(i, dummy.matrix);
       buildingMesh!.setColorAt(i, color.set(baseBuildingColor(b.node)));
 
-      // Внутри +1-купола клик ведёт в РОДИТЕЛЬСКИЙ район (как и клик по самому
-      // куполу); файл верхнего уровня — это select (drillTarget = он сам, не папка).
+      // Внутри папки клик ведёт в РОДИТЕЛЬСКИЙ район (как и клик по плите);
+      // файл верхнего уровня — это select (drillTarget = он сам, не папка).
       const drillTarget =
         b.districtIdx !== null ? districts[b.districtIdx].node : b.node;
       buildingPick[i] = { node: b.node, drillTarget };
@@ -495,26 +711,23 @@ export function buildLevel(
     group.add(buildingMesh);
   }
 
-  // --- Купола (+1, стекло) + ободки (металл). На +2 (теплицы) отдельной СТЕКЛЯННОЙ
-  // оболочки НЕТ: прозрачный объект не попадает в буфер, который сэмплит
-  // `transmission`, и потому рендерился бы поверх стекла родителя ЧЁТКО (а его
-  // дешёвый материал ничего не размывает). +2 представлен только НЕПРОЗРАЧНЫМИ
-  // серыми кубами — они попадают в буфер и размываются стеклом родительского +1
-  // купола (а +2 всегда внутри +1). Так заглушки «теплицы» читаются так же мутно,
-  // как и файлы внутри купола. domeMesh индексируется районом `j`; инстансы +2
-  // вырождены (ZERO_MATRIX), пикинг +2 идёт через объемлющий купол +1.
+  // --- Облик папок: каждая папка — плита-постамент (И обводка, И пол под содержимым).
+  //   - +1 (прямой ребёнок уровня): плита-постамент + матовый стеклянный купол сверху;
+  //   - вложенные папки +2/+3: только плита-постамент (без стекла — z-fighting нет).
+  // Материал плиты: МЕТАЛЛ на +1/+2 (`baseMesh`), МАТОВЫЙ на +3 (`baseMatteMesh`) —
+  // глубинная детализация. Плиты непрозрачны → opaque-проход → морозятся стеклом +1.
+  // dome/base/baseMatte индексируются районом `j` (неподходящие вырождены ZERO_MATRIX).
+  // Пикинг любого из них → район `j`.
   const districtPick: (PickInfo | null)[] = [];
   let domeMesh: InstancedMesh | null = null;
-  let ringMesh: InstancedMesh | null = null;
+  let baseMesh: InstancedMesh | null = null;
+  let baseMatteMesh: InstancedMesh | null = null;
   const domeReal: Matrix4[] = [];
-  const ringReal: Matrix4[] = [];
+  const baseReal: Matrix4[] = [];
+  const baseMatteReal: Matrix4[] = [];
 
-  // --- Кубы-заглушки куполов-теплиц (+2): 4 на купол; запоминаем их район.
-  interface StubAcc {
-    matrix: Matrix4;
-    districtIdx: number;
-  }
-  const stubs: StubAcc[] = [];
+  /** Папка отрисована металлической плитой (+1/+2) против матовой (+3). */
+  const isMetalBase = (d: DistrictAcc): boolean => d.d3depth <= 2;
 
   if (districts.length > 0) {
     // +1 стекло — НАСТОЯЩЕЕ матовое (`transmission`, вариант (б) из §II.3.7):
@@ -531,30 +744,47 @@ export function buildLevel(
         thickness: 6, // «толщина» стекла — глубина преломления/затухания
         ior: 1.45,
         transparent: true,
-        depthWrite: false, // прозрачный проход: домики внутри просвечивают
+        // Купола — НЕпересекающиеся в XZ сплошные объёмы (treemap-плитки). Three.js
+        // не сортирует инстансы внутри одного InstancedMesh, поэтому при depthWrite:false
+        // их перекрытие зависело от фиксированного порядка буфера → дальние купола
+        // красились поверх ближних при повороте камеры. depthWrite:true решает
+        // купол-vs-купол пофрагментно (depth-тест) при любом угле. Просвечивание
+        // содержимого сохраняется: домики внутри непрозрачны, попадают в opaque-проход
+        // и transmission-буфер ДО купола (см. §II.3.7).
+        depthWrite: true,
       }),
       districts.length,
     );
-    domeMesh.renderOrder = 2; // после непрозрачных (здания/ободки/заглушки)
-    // Ободок — тот же скруглённый куб, что и купол (совпадение кривизны углов),
-    // footprint чуть БОЛЬШЕ купола (выступает поребриком). Металл виден только за
-    // счёт отражений env-map (см. scene.ts) — без неё рендерился бы чёрным. Только
-    // у +1 (постамент-обособление); у +2-теплиц ободка нет (вырожден).
-    ringMesh = new InstancedMesh(
+    domeMesh.renderOrder = 2; // после непрозрачных (здания/плиты)
+    // Плита-постамент: тот же скруглённый куб, что и купол (совпадение кривизны
+    // углов). Металл (+1/+2) виден за счёт отражений env-map (см. scene.ts).
+    baseMesh = new InstancedMesh(
       new RoundedBoxGeometry(1, 1, 1, DOME_ROUND_SEGMENTS, DOME_ROUND_RADIUS),
       new MeshStandardMaterial({ metalness: 0.9, roughness: 0.35 }),
       districts.length,
     );
+    // Матовая плита вложенных папок +3 (без металлики) — глубинная детализация.
+    baseMatteMesh = new InstancedMesh(
+      new RoundedBoxGeometry(1, 1, 1, DOME_ROUND_SEGMENTS, DOME_ROUND_RADIUS),
+      new MeshStandardMaterial({ metalness: 0, roughness: 0.6 }),
+      districts.length,
+    );
 
     districts.forEach((d, j) => {
-      const full = layoutToWorld(d.rect, 0); // footprint района целиком (под ободок)
+      const full = layoutToWorld(d.rect, 0); // footprint района целиком (под плиту)
 
-      // Купол: footprint утоплен внутрь рамки, чтобы ободок выступал поребриком.
-      const dw = Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2);
-      const dd = Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2);
+      // Плита-постамент: у +1 footprint утоплен и расширен поребриком (как раньше
+      // металлический ободок); у вложенных — ровно по footprint района (его край
+      // обводит застройку, которая отступила внутрь на CONTENT_MARGIN_FRAC).
+      let baseW: number;
+      let baseD: number;
+      if (d.d3depth === 1) {
+        const dw = Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2);
+        const dd = Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2);
+        baseW = dw + RING_RIM * 2;
+        baseD = dd + RING_RIM * 2;
 
-      if (d.depth === 1) {
-        // +1: стеклянный купол + металлический ободок.
+        // Стеклянный купол: накрывает поднятое содержимое (footprint утоплен).
         const h = domeHeight(d);
         dummy.position.set(full.centerX, h / 2, full.centerZ);
         dummy.scale.set(dw, h, dd);
@@ -562,36 +792,50 @@ export function buildLevel(
         domeReal[j] = dummy.matrix.clone();
         domeMesh!.setMatrixAt(j, dummy.matrix);
         domeMesh!.setColorAt(j, color.set(GLASS_COLOR));
-
-        dummy.position.set(full.centerX, RING_HEIGHT / 2, full.centerZ);
-        dummy.scale.set(dw + RING_RIM * 2, RING_HEIGHT, dd + RING_RIM * 2);
-        dummy.updateMatrix();
-        ringReal[j] = dummy.matrix.clone();
-        ringMesh!.setMatrixAt(j, dummy.matrix);
-        ringMesh!.setColorAt(j, color.set(ringBaseColor(d.node)));
       } else {
-        // +2: ни купола, ни ободка — только серые кубы-заглушки (непрозрачные →
-        // размываются стеклом родительского +1). Инстансы купола/ободка вырождены.
+        baseW = full.width;
+        baseD = full.depth;
         domeReal[j] = ZERO_MATRIX;
-        ringReal[j] = ZERO_MATRIX;
         domeMesh!.setMatrixAt(j, ZERO_MATRIX);
-        ringMesh!.setMatrixAt(j, ZERO_MATRIX);
-        buildStubs(stubs, d, j, dw, dd, full.centerX, full.centerZ, dummy);
       }
 
-      // Пикинг купола: +1 → drill в сам район; +2 (заглушка внутри +1) → drill в
-      // родительский +1 (за один шаг ходим только на уровень глубже, §II.3.7).
-      const drillTarget =
-        d.depth === 2 && d.parentIdx !== null
-          ? districts[d.parentIdx].node
-          : d.node;
+      // Сама плита: стоит на `floorY` (полу родителя), высотой `baseHeight`.
+      dummy.position.set(
+        full.centerX,
+        d.floorY + d.baseHeight / 2,
+        full.centerZ,
+      );
+      dummy.scale.set(baseW, d.baseHeight, baseD);
+      dummy.updateMatrix();
+      const baseMat = dummy.matrix.clone();
+      if (isMetalBase(d)) {
+        baseReal[j] = baseMat;
+        baseMesh!.setMatrixAt(j, baseMat);
+        baseMatteReal[j] = ZERO_MATRIX;
+        baseMatteMesh!.setMatrixAt(j, ZERO_MATRIX);
+      } else {
+        baseMatteReal[j] = baseMat;
+        baseMatteMesh!.setMatrixAt(j, baseMat);
+        baseReal[j] = ZERO_MATRIX;
+        baseMesh!.setMatrixAt(j, ZERO_MATRIX);
+      }
+      // Цвет плиты держим на ОБОИХ мешах (paintAll красит все j независимо от облика).
+      baseMesh!.setColorAt(j, color.set(ringBaseColor(d.node)));
+      baseMatteMesh!.setColorAt(j, color.set(ringBaseColor(d.node)));
+
+      // Пикинг папки: за один шаг ходим только на уровень глубже (§II.3.7) →
+      // drill всегда в район d3-глубины 1 (для самого +1 это он сам).
+      const drillTarget = districts[d.topIdx].node;
       districtPick[j] = { node: d.node, drillTarget };
       districtIndexByPath.set(d.node.path, j);
-      // childPlacement только для +1 (реальные прямые дети текущего уровня).
-      if (d.depth === 1) {
+      // childPlacement только для прямых детей текущего уровня (d3-глубина 1).
+      if (d.d3depth === 1) {
         placements.set(d.node.path, {
           s: Math.max(full.width, full.depth) / CITY_SPAN,
           cx: full.centerX,
+          // Пол содержимого района = верх его плиты-постамента: под `G` активный
+          // (пол 0) садится сюда → drill бесшовен по Y (decor уезжает вниз, план §8).
+          cy: d.contentFloor,
           cz: full.centerZ,
           w: full.width,
           d: full.depth,
@@ -599,40 +843,35 @@ export function buildLevel(
       }
     });
     domeMesh.instanceMatrix.needsUpdate = true;
-    ringMesh.instanceMatrix.needsUpdate = true;
+    baseMesh.instanceMatrix.needsUpdate = true;
+    baseMatteMesh.instanceMatrix.needsUpdate = true;
     if (domeMesh.instanceColor) domeMesh.instanceColor.needsUpdate = true;
-    if (ringMesh.instanceColor) ringMesh.instanceColor.needsUpdate = true;
-    group.add(ringMesh);
+    if (baseMesh.instanceColor) baseMesh.instanceColor.needsUpdate = true;
+    if (baseMatteMesh.instanceColor)
+      baseMatteMesh.instanceColor.needsUpdate = true;
+    group.add(baseMesh);
+    group.add(baseMatteMesh);
     group.add(domeMesh);
   }
 
-  // --- Кубы-заглушки в один InstancedMesh (после раскладки всех теплиц).
-  // Непрозрачные: размываются стеклом родительского +1 купола (см. выше).
-  let stubMesh: InstancedMesh | null = null;
-  if (stubs.length > 0) {
-    stubMesh = new InstancedMesh(
-      new BoxGeometry(1, 1, 1),
-      new MeshStandardMaterial({ roughness: 0.7, metalness: 0 }),
-      stubs.length,
-    );
-    stubs.forEach((s, k) => {
-      stubMesh!.setMatrixAt(k, s.matrix);
-      stubMesh!.setColorAt(k, color.set(STUB_COLOR));
-    });
-    stubMesh.instanceMatrix.needsUpdate = true;
-    if (stubMesh.instanceColor) stubMesh.instanceColor.needsUpdate = true;
-    group.add(stubMesh);
-  }
-
   // Облик: декор притушен, активный — полный. `excludedIdx` — район, ставший
-  // активным уровнем (его купол/застройка в декоре скрыты).
+  // активным уровнем (его купол/застройка в декоре скрыты). `decorBudget` — LOD-срез
+  // по глубине (план §4): в декоре инстансы глубже бюджета скрыты, в активном — полный.
   let isDecor = false;
   let excludedIdx: number | null = null;
+  let decorBudget = PREVIEW_MAX_DEPTH;
+  // Множитель затемнения декора (план §7.1): 1 — полный цвет (неотличим от активного),
+  // ниже — плавно в фон. Навигатор гонит его покадрово по `S_k` (градиент + кросс-фейд).
+  let decorDim = DECOR_GRAY;
 
-  /** Принадлежит ли купол `j` исключённому поддереву (сам район или его +2-теплицы). */
+  /** Принадлежит ли район `j` исключённому поддереву (сам район +1 или всё под ним). */
   const districtExcluded = (j: number): boolean =>
     excludedIdx !== null &&
-    (j === excludedIdx || districts[j].parentIdx === excludedIdx);
+    (j === excludedIdx || districts[j].topIdx === excludedIdx);
+
+  /** d3-глубина здания: вложенный домик — глубина владельца +1; файл верхнего уровня — 1. */
+  const buildingDepth = (b: BuildingAcc): number =>
+    b.districtIdx !== null ? districts[b.districtIdx].d3depth + 1 : 1;
 
   const view: CityView = {
     updateLOD() {
@@ -642,25 +881,38 @@ export function buildLevel(
       if (isDecor) return []; // декор не кликабелен (docs: формы без raycast)
       const out: InstancedMesh[] = [];
       if (buildingMesh) out.push(buildingMesh);
-      if (domeMesh) out.push(domeMesh); // +1 купола; +2 пикается через объемлющий +1
+      if (domeMesh) out.push(domeMesh); // +1 купола
+      if (baseMesh) out.push(baseMesh); // плиты-постаменты +1/+2
+      if (baseMatteMesh) out.push(baseMatteMesh); // плиты-постаменты +3
       return out;
     },
     resolvePick(mesh, instanceId) {
       if (mesh === buildingMesh) return buildingPick[instanceId] ?? null;
-      if (mesh === domeMesh) return districtPick[instanceId] ?? null;
+      if (mesh === domeMesh || mesh === baseMesh || mesh === baseMatteMesh)
+        return districtPick[instanceId] ?? null;
       return null;
     },
   };
 
-  /** Притушить общий material меша до серого (per-instance цвета сохраняются). */
-  function grayOut(mesh: InstancedMesh): void {
+  /** Затемнить общий material меша до фактора `f` (per-instance цвета сохраняются):
+   *  `f=1` — полный цвет, ниже — к фону. Фейд декора — через этот множитель, без
+   *  прозрачности (план §7.1: «плавно к серому/в фон», а не alpha). */
+  function dimMesh(mesh: InstancedMesh, f: number): void {
     const mat = mesh.material as MeshStandardMaterial | MeshLambertMaterial;
-    mat.color.setRGB(DECOR_GRAY, DECOR_GRAY, DECOR_GRAY);
+    mat.color.setRGB(f, f, f);
   }
   /** Вернуть общий material меша к белому (per-instance цвет = итоговый). */
   function whiten(mesh: InstancedMesh): void {
     const mat = mesh.material as MeshStandardMaterial | MeshLambertMaterial;
     mat.color.setRGB(1, 1, 1);
+  }
+  /** Применить текущий `decorDim` ко всем мешам (только цвет, без матриц) — для
+   *  покадрового кросс-фейда декора (дёшево, матрицы не трогаем). */
+  function recolorDecor(): void {
+    if (buildingMesh) dimMesh(buildingMesh, decorDim);
+    if (domeMesh) dimMesh(domeMesh, decorDim);
+    if (baseMesh) dimMesh(baseMesh, decorDim);
+    if (baseMatteMesh) dimMesh(baseMatteMesh, decorDim);
   }
 
   /** Привести инстансы в декор-облик: притушено, исключённое поддерево скрыто. */
@@ -670,31 +922,43 @@ export function buildLevel(
 
     if (buildingMesh) {
       buildings.forEach((b, i) => {
-        const hide = b.districtIdx !== null && b.districtIdx === excludedIdx;
+        // Скрыто, если в исключённом поддереве ЛИБО глубже LOD-бюджета (§4).
+        const hide =
+          (b.topDistrictIdx !== null && b.topDistrictIdx === excludedIdx) ||
+          buildingDepth(b) > decorBudget;
         buildingMesh!.setMatrixAt(i, hide ? ZERO_MATRIX : buildingReal[i]);
       });
       buildingMesh.instanceMatrix.needsUpdate = true;
-      grayOut(buildingMesh);
+      dimMesh(buildingMesh, decorDim);
     }
-    if (domeMesh && ringMesh) {
-      // +2 инстансы купола/ободка и так вырождены (domeReal/ringReal = ZERO).
-      districts.forEach((_, j) => {
-        const hide = districtExcluded(j);
+    if (domeMesh && baseMesh && baseMatteMesh) {
+      // Вырожденные по облику инстансы и так = ZERO (domeReal/baseReal/baseMatteReal).
+      districts.forEach((d, j) => {
+        // Сам дрилл-район (план §8): купол и застройку скрываем (их несёт активный
+        // уровень), но ПЛИТУ-постамент оставляем на её каноническом месте — на неё
+        // «садится» активный. Нужный вертикальный сдвиг (плита уходит на стопку вниз,
+        // верх — на пол активного) даёт трансформ группы (`G⁻¹` с `cy`), репозициони-
+        // ровать плиту вручную не нужно. d3-глубина исключённого = 1 → плита металл-
+        // ческая (`baseReal`; `baseMatteReal[j]` и так ZERO).
+        if (j === excludedIdx) {
+          domeMesh!.setMatrixAt(j, ZERO_MATRIX);
+          baseMatteMesh!.setMatrixAt(j, ZERO_MATRIX);
+          baseMesh!.setMatrixAt(j, baseReal[j]);
+          return;
+        }
+        // Остальное исключённое поддерево (под дрилл-районом) скрыто целиком; плюс
+        // LOD-срез: район глубже бюджета тоже скрыт (§4, обратимо).
+        const hide = districtExcluded(j) || d.d3depth > decorBudget;
         domeMesh!.setMatrixAt(j, hide ? ZERO_MATRIX : domeReal[j]);
-        ringMesh!.setMatrixAt(j, hide ? ZERO_MATRIX : ringReal[j]);
+        baseMesh!.setMatrixAt(j, hide ? ZERO_MATRIX : baseReal[j]);
+        baseMatteMesh!.setMatrixAt(j, hide ? ZERO_MATRIX : baseMatteReal[j]);
       });
       domeMesh.instanceMatrix.needsUpdate = true;
-      ringMesh.instanceMatrix.needsUpdate = true;
-      grayOut(domeMesh);
-      grayOut(ringMesh);
-    }
-    if (stubMesh) {
-      stubs.forEach((s, k) => {
-        const hide = districtExcluded(s.districtIdx);
-        stubMesh!.setMatrixAt(k, hide ? ZERO_MATRIX : s.matrix);
-      });
-      stubMesh.instanceMatrix.needsUpdate = true;
-      grayOut(stubMesh);
+      baseMesh.instanceMatrix.needsUpdate = true;
+      baseMatteMesh.instanceMatrix.needsUpdate = true;
+      dimMesh(domeMesh, decorDim);
+      dimMesh(baseMesh, decorDim);
+      dimMesh(baseMatteMesh, decorDim);
     }
   }
 
@@ -710,20 +974,103 @@ export function buildLevel(
       buildingMesh.instanceMatrix.needsUpdate = true;
       whiten(buildingMesh);
     }
-    if (domeMesh && ringMesh) {
+    if (domeMesh && baseMesh && baseMatteMesh) {
       districts.forEach((_, j) => {
         domeMesh!.setMatrixAt(j, domeReal[j]);
-        ringMesh!.setMatrixAt(j, ringReal[j]);
+        baseMesh!.setMatrixAt(j, baseReal[j]);
+        baseMatteMesh!.setMatrixAt(j, baseMatteReal[j]);
       });
       domeMesh.instanceMatrix.needsUpdate = true;
-      ringMesh.instanceMatrix.needsUpdate = true;
+      baseMesh.instanceMatrix.needsUpdate = true;
+      baseMatteMesh.instanceMatrix.needsUpdate = true;
       whiten(domeMesh);
-      whiten(ringMesh);
+      whiten(baseMesh);
+      whiten(baseMatteMesh);
     }
-    if (stubMesh) {
-      stubs.forEach((s, k) => stubMesh!.setMatrixAt(k, s.matrix));
-      stubMesh.instanceMatrix.needsUpdate = true;
-      whiten(stubMesh);
+  }
+
+  /** Снять купол района `path` в отдельный анимируемый меш (см. Level.extractDome). */
+  function extractDome(p: string): DrillDome | null {
+    if (!domeMesh) return null;
+    const j = districtIndexByPath.get(p);
+    if (j === undefined) return null;
+    const e = domeReal[j].elements;
+    const sy = e[5];
+    if (sy === 0) return null; // район не +1 — купола нет
+
+    // Спрятать инстанс купола в общем меше — его место займёт отдельный меш.
+    domeMesh.setMatrixAt(j, ZERO_MATRIX);
+    domeMesh.instanceMatrix.needsUpdate = true;
+
+    // Клон материала купола: тот же «мороз», но фейдим opacity и не пишем глубину
+    // (полупрозрачный, уезжает над активной застройкой). Цвет стекла был per-instance.
+    const mat = (domeMesh.material as MeshPhysicalMaterial).clone();
+    mat.transparent = true;
+    mat.depthWrite = false;
+    mat.color.set(GLASS_COLOR);
+    const mesh = new Mesh(
+      new RoundedBoxGeometry(1, 1, 1, DOME_ROUND_SEGMENTS, DOME_ROUND_RADIUS),
+      mat,
+    );
+    // domeReal[j] — чистое подобие (scale+translate, без вращений): берём прямо из
+    // элементов матрицы, не раскладывая её.
+    mesh.scale.set(e[0], sy, e[10]);
+    const baseY = e[13];
+    mesh.position.set(e[12], baseY, e[14]);
+    mesh.renderOrder = 3; // поверх непрозрачных, как и обычный купол
+    group.add(mesh);
+    const liftBy = sy * DOME_LIFT_FACTOR;
+
+    return {
+      setProgress(prog) {
+        const t = prog < 0 ? 0 : prog > 1 ? 1 : prog;
+        mesh.position.y = baseY + liftBy * (1 - (1 - t) ** 3); // easeOutCubic-подъём
+        const fade = smoothstep01(
+          (t - DOME_FADE_START) / (1 - DOME_FADE_START),
+        );
+        mat.opacity = 1 - fade; // растворение на хвосте отрезка (smoothstep)
+      },
+      dispose() {
+        group.remove(mesh);
+        mesh.geometry.dispose();
+        mat.dispose();
+      },
+    };
+  }
+
+  /** Затемнение периметра «на входе» (drill), кроме раскрываемого поддерева — см.
+   *  Level.setEnterDim. Только per-instance цвет (×factor), без матриц. */
+  function setEnterDim(excludePath: string, factor: number): void {
+    const exIdx = districtIndexByPath.get(excludePath) ?? null;
+    if (buildingMesh) {
+      buildings.forEach((b, i) => {
+        // Раскрываемое поддерево остаётся ярким (его подхватит новый активный).
+        if (b.topDistrictIdx !== null && b.topDistrictIdx === exIdx) return;
+        buildingMesh!.setColorAt(
+          i,
+          color.set(baseBuildingColor(b.node)).multiplyScalar(factor),
+        );
+      });
+      if (buildingMesh.instanceColor)
+        buildingMesh.instanceColor.needsUpdate = true;
+    }
+    if (domeMesh && baseMesh && baseMatteMesh) {
+      districts.forEach((d, j) => {
+        if (j === exIdx || d.topIdx === exIdx) return;
+        domeMesh!.setColorAt(j, color.set(GLASS_COLOR).multiplyScalar(factor));
+        baseMesh!.setColorAt(
+          j,
+          color.set(ringBaseColor(d.node)).multiplyScalar(factor),
+        );
+        baseMatteMesh!.setColorAt(
+          j,
+          color.set(ringBaseColor(d.node)).multiplyScalar(factor),
+        );
+      });
+      if (domeMesh.instanceColor) domeMesh.instanceColor.needsUpdate = true;
+      if (baseMesh.instanceColor) baseMesh.instanceColor.needsUpdate = true;
+      if (baseMatteMesh.instanceColor)
+        baseMatteMesh.instanceColor.needsUpdate = true;
     }
   }
 
@@ -732,22 +1079,41 @@ export function buildLevel(
     path,
     span,
     view,
+    extractDome,
+    setEnterDim,
     childPlacement(p) {
       return placements.get(p) ?? null;
     },
-    setDecor(excludePath) {
-      if (isDecor) return;
+    setDecor(excludePath, budget = PREVIEW_MAX_DEPTH, dim = DECOR_GRAY) {
       isDecor = true;
       excludedIdx =
         (excludePath !== undefined
           ? districtIndexByPath.get(excludePath)
           : undefined) ?? null;
+      decorBudget = budget;
+      decorDim = dim;
       applyDecor();
+    },
+    setDecorBudget(budget) {
+      if (!isDecor || budget === decorBudget) return;
+      decorBudget = budget;
+      applyDecor();
+    },
+    setDecorDim(dim) {
+      if (!isDecor || dim === decorDim) return;
+      decorDim = dim;
+      recolorDecor(); // только цвет, без матриц — дёшево покадрово
+    },
+    setGroundShown(visible) {
+      ground.visible = visible;
+      roadDots.visible = visible;
     },
     setActive() {
       if (!isDecor) return;
       isDecor = false;
       excludedIdx = null;
+      decorBudget = PREVIEW_MAX_DEPTH;
+      decorDim = DECOR_GRAY;
       applyActive();
     },
     setHighlight(match) {
@@ -792,56 +1158,18 @@ export function buildLevel(
       if (buildingMesh.instanceColor)
         buildingMesh.instanceColor.needsUpdate = true;
     }
-    if (domeMesh && ringMesh) {
-      // +2 инстансы купола/ободка вырождены (не видны), но цвет держим согласованным.
+    if (domeMesh && baseMesh && baseMatteMesh) {
+      // Цвет держим на ВСЕХ инстансах обоих плит-мешей (на случай смены глубины/
+      // декора): купол — стекло, плиты — цвет района.
       districts.forEach((d, j) => {
         domeMesh!.setColorAt(j, paint(d.node, GLASS_COLOR));
-        ringMesh!.setColorAt(j, paint(d.node, ringBaseColor(d.node)));
+        baseMesh!.setColorAt(j, paint(d.node, ringBaseColor(d.node)));
+        baseMatteMesh!.setColorAt(j, paint(d.node, ringBaseColor(d.node)));
       });
       if (domeMesh.instanceColor) domeMesh.instanceColor.needsUpdate = true;
-      if (ringMesh.instanceColor) ringMesh.instanceColor.needsUpdate = true;
-    }
-    if (stubMesh) {
-      stubs.forEach((s, k) => {
-        const node = districts[s.districtIdx].node;
-        stubMesh!.setColorAt(k, paint(node, STUB_COLOR));
-      });
-      if (stubMesh.instanceColor) stubMesh.instanceColor.needsUpdate = true;
-    }
-  }
-}
-
-/**
- * Четыре серых куба-заглушки 2×2 внутри footprint купола-теплицы (+2). Высоты
- * разные («четыре разных серых куба», §II.3.2). Кубы — фиксированный декоративный
- * паттерн (не отражают реальное число детей), нарочито невзрачный.
- */
-function buildStubs(
-  out: { matrix: Matrix4; districtIdx: number }[],
-  d: DistrictAcc,
-  districtIdx: number,
-  domeW: number,
-  domeD: number,
-  cx: number,
-  cz: number,
-  dummy: Object3D,
-): void {
-  const gx = domeW * STUB_GAP;
-  const gz = domeD * STUB_GAP;
-  const cellW = (domeW - gx) / 2;
-  const cellD = (domeD - gz) / 2;
-  const baseH = STUB_CANON_HEIGHT * d.footprintScale;
-  let k = 0;
-  for (const sx of [-1, 1]) {
-    for (const sz of [-1, 1]) {
-      const h = baseH * STUB_HEIGHT_RATIOS[k % STUB_HEIGHT_RATIOS.length];
-      const px = cx + (sx * (cellW + gx)) / 2;
-      const pz = cz + (sz * (cellD + gz)) / 2;
-      dummy.position.set(px, h / 2, pz);
-      dummy.scale.set(cellW * 0.8, h, cellD * 0.8);
-      dummy.updateMatrix();
-      out.push({ matrix: dummy.matrix.clone(), districtIdx });
-      k++;
+      if (baseMesh.instanceColor) baseMesh.instanceColor.needsUpdate = true;
+      if (baseMatteMesh.instanceColor)
+        baseMatteMesh.instanceColor.needsUpdate = true;
     }
   }
 }
@@ -883,7 +1211,7 @@ function makeFadedGround(span: LevelSpan): Mesh {
   geo.setAttribute("color", new Float32BufferAttribute(colors, 3));
   const ground = new Mesh(geo, new MeshLambertMaterial({ vertexColors: true }));
   ground.rotation.x = -Math.PI / 2; // в плоскость XZ
-  ground.position.y = -0.01; // чуть ниже основания зданий
+  ground.position.y = -0.3; // чуть ниже основания зданий и подиума
   return ground;
 }
 
@@ -952,7 +1280,7 @@ function buildRoadDots(
   // 1) Бордюры вокруг блоков верхнего уровня (купола +1 + файлы верхнего уровня;
   //    вложенное содержимое куполов — не блоки, у них нет дорог).
   for (const d of districts) {
-    if (d.depth === 1) addCurbDots(dots, d.rect);
+    if (d.d3depth === 1) addCurbDots(dots, d.rect);
   }
   for (const b of buildings) {
     if (b.districtIdx === null) addCurbDots(dots, b.rect);
