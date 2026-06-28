@@ -13,7 +13,12 @@
    * добавлением ветки сюда ИЛИ временным захватом слота из своего компонента.
    */
   import { appMode, scanProgress } from "../store/mode";
-  import { footerSlot, levelSummary, filtersOpen, hiddenOpen } from "../store/ui";
+  import {
+    footerSlot,
+    levelSummary,
+    filtersOpen,
+    hiddenOpen,
+  } from "../store/ui";
   import DiskMapProgress from "./footer/DiskMapProgress.svelte";
   import DiskFillBar from "./footer/DiskFillBar.svelte";
   import Legend from "./Legend.svelte";

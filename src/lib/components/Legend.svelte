@@ -61,13 +61,22 @@
           soloCategory(cat);
         }}
       >
-        <span class="dot" style="background:{filter.has(cat) ? hex(CATEGORY_COLOR[cat]) : 'var(--text-muted)'}"></span>
+        <span
+          class="dot"
+          style="background:{filter.has(cat)
+            ? hex(CATEGORY_COLOR[cat])
+            : 'var(--text-muted)'}"
+        ></span>
         <span class="name">{CATEGORY_LABEL[cat]}</span>
       </button>
     {/each}
 
     {#if active}
-      <button class="reset" onclick={resetCategories} title="Сбросить фильтр категорий">
+      <button
+        class="reset"
+        onclick={resetCategories}
+        title="Сбросить фильтр категорий"
+      >
         Сбросить
       </button>
     {/if}

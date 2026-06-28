@@ -7,7 +7,13 @@
    * исполняет владелец сцены (Scene). Поиск — отдельный компонент, пишет в свой
    * стор. Выбор темы добавится сюда позже (структура регионов готова).
    */
-  import { appMode, markedCount, markedBytes, breadcrumbs, hiddenPaths } from "../store/mode";
+  import {
+    appMode,
+    markedCount,
+    markedBytes,
+    breadcrumbs,
+    hiddenPaths,
+  } from "../store/mode";
   import {
     dispatchCommand,
     filtersOpen,
@@ -24,7 +30,7 @@
   let markedSize = $derived($markedBytes);
   let canReroot = $derived(
     $breadcrumbs.length > 1 &&
-      !$breadcrumbs[$breadcrumbs.length - 1]?.path.endsWith("::<other>")
+      !$breadcrumbs[$breadcrumbs.length - 1]?.path.endsWith("::<other>"),
   );
   let hiddenCount = $derived($hiddenPaths.length);
 </script>

@@ -74,6 +74,70 @@ export function visibleCount(mesh: InstancedMesh): number {
   return n;
 }
 
+/** Минимум от `CityView`, нужный помощникам тестов (без импорта типа из city). */
+interface ViewLike {
+  pickMeshes(): InstancedMesh[];
+  resolvePick(
+    mesh: InstancedMesh,
+    instanceId: number,
+  ): { node: ScanNode; drillTarget: ScanNode } | null;
+}
+
+/**
+ * Меши уровня по ролям. Классификация по первому инстансу: меш ЗДАНИЙ резолвится в
+ * файл-лист (`!isDir`, не агрегат), меш-КОНТЕЙНЕР — в папку/агрегат. Зданий несколько
+ * (по категории); контейнеры идут стабильным порядком `[dome, base, baseMatte]` (см.
+ * `CityView.pickMeshes`). Устойчиво к уровням без папок (контейнеров нет). Применимо к
+ * активному облику (в декоре `pickMeshes` пуст — брать меши ДО `setDecor`).
+ */
+export function pickRoles(view: ViewLike): {
+  buildings: InstancedMesh[];
+  dome: InstancedMesh;
+  base: InstancedMesh;
+  baseMatte: InstancedMesh;
+} {
+  const meshes = view.pickMeshes();
+  const buildings: InstancedMesh[] = [];
+  const containers: InstancedMesh[] = [];
+  for (const m of meshes) {
+    const info = m.count > 0 ? view.resolvePick(m, 0) : null;
+    const isBuilding =
+      !!info && !info.node.isDir && !info.node.flags.includes("aggregated");
+    (isBuilding ? buildings : containers).push(m);
+  }
+  return {
+    buildings,
+    dome: containers[0],
+    base: containers[1],
+    baseMatte: containers[2],
+  };
+}
+
+/** Сумма `count` по нескольким мешам (зданий несколько — по категориям). */
+export function sumCount(meshes: InstancedMesh[]): number {
+  return meshes.reduce((n, m) => n + m.count, 0);
+}
+
+/** Сколько инстансов видимо суммарно по нескольким мешам. */
+export function sumVisible(meshes: InstancedMesh[]): number {
+  return meshes.reduce((n, m) => n + visibleCount(m), 0);
+}
+
+/** Найти (меш + индекс инстанса) здания по пути узла среди категорийных мешей. */
+export function findBuilding(
+  view: ViewLike,
+  buildings: InstancedMesh[],
+  path: string,
+): { mesh: InstancedMesh; index: number } | null {
+  for (const mesh of buildings) {
+    for (let i = 0; i < mesh.count; i++) {
+      const info = view.resolvePick(mesh, i);
+      if (info && info.node.path === path) return { mesh, index: i };
+    }
+  }
+  return null;
+}
+
 /**
  * Индекс инстанса с центром основания в (cx, cz) (поиск района по позиции —
  * стабильнее, чем гадать порядок d3-раскладки). `null`, если не нашли.

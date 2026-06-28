@@ -40,7 +40,7 @@
         if (Date.now() / 1000 - n.mtime < olderThan) return false;
       }
       return true;
-    })
+    }),
   );
 
   // Суммарный объём кандидатов этого уровня (для строки причины).
@@ -121,7 +121,11 @@
   </label>
 
   {#if $filterActive}
-    <button class="reset-filter" onclick={resetFilters} title="Сбросить фильтры кандидатов">
+    <button
+      class="reset-filter"
+      onclick={resetFilters}
+      title="Сбросить фильтры кандидатов"
+    >
       Сбросить
     </button>
   {/if}

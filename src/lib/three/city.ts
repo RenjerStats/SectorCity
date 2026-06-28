@@ -42,7 +42,6 @@
  * Контакт с DOM — нет: это императивный 3D-слой. Уровнями владеет `navigator.ts`.
  */
 import {
-  BoxGeometry,
   type Camera,
   CircleGeometry,
   Color,
@@ -61,16 +60,16 @@ import {
 } from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { hierarchy, treemap, treemapSquarify } from "d3-hierarchy";
-import type { ScanNode } from "../ipc/contract";
+import type { Category, ScanNode } from "../ipc/contract";
 import {
   AGGREGATE_COLOR,
-  CATEGORY_COLOR,
   CLEANUP_MARK_COLOR,
   DOME_RING_COLOR,
   GLASS_COLOR,
   GLASS_ROUGHNESS,
   GROUND_COLOR,
 } from "./palette";
+import { makeBuildingDef } from "./buildings";
 import { layoutToWorld, type TreemapRect } from "./layoutToWorld";
 
 /** Каноническая сторона уровня-владельца (мировые единицы): бо́льшая сторона. */
@@ -617,16 +616,6 @@ function heightFromMtime(mtime: number, nowSeconds: number): number {
 const ZERO_MATRIX = new Matrix4().makeScale(0, 0, 0);
 
 /**
- * Базовый цвет здания-файла. Синтетический блок «Мелочь» (флаг `aggregated`) →
- * собственный цвет-агрегата (не из категорийной палитры — чтобы не путать с
- * папкой/категорией); иначе — цвет категории.
- */
-function baseBuildingColor(node: ScanNode): number {
-  if (node.flags.includes("aggregated")) return AGGREGATE_COLOR;
-  return CATEGORY_COLOR[node.category];
-}
-
-/**
  * Базовый цвет металлического ободка-основания купола. Обычная папка → нейтральный
  * металл; блок «Мелочь» (`aggregated`) несёт цвет-агрегат, чтобы читаться как
  * «объединённая мелочь», а не обычная папка. Стекло купола всегда нейтрально
@@ -641,11 +630,11 @@ function ringBaseColor(node: ScanNode): number {
  * `span`). Группа создаётся в identity — размещение в мир задаёт навигатор.
  *
  * Меши уровня:
- *   - `buildingMesh` — файлы (верхнего уровня + вложенные домики);
+ *   - `buildGroups`  — файлы: ПО ОДНОМУ InstancedMesh на категорию (уникальная
+ *                      геометрия+материалы зданий, см. `buildings.ts`);
  *   - `domeMesh`     — матовые стеклянные купола папок +1 (transmission, §II.3.7);
- *   - `ringMesh`     — металлические ободки-основания куполов +1;
- *   - `volumeMesh`   — непрозрачные объёмы-«пузыри» вложенных папок БЕЗ прямых файлов;
- *   - `frameMesh`    — периметральные рамки-ободки вложенных папок С файлами.
+ *   - `baseMesh`     — металлические плиты-постаменты папок +1/+2;
+ *   - `baseMatteMesh`— матовые плиты-постаменты папок +3 (детализация по глубине).
  */
 export function buildLevel(
   nodes: ScanNode[],
@@ -676,39 +665,76 @@ export function buildLevel(
   const districtIndexByPath = new Map<string, number>();
 
   // --- Здания: файлы верхнего уровня + вложенные домики (+1, внутри куполов).
-  const buildingPick: (PickInfo | null)[] = [];
-  let buildingMesh: InstancedMesh | null = null;
-  const buildingReal: Matrix4[] = [];
+  // По одному InstancedMesh на КАТЕГОРИЮ — уникальная геометрия+материалы зданий
+  // живут в `buildings.ts`. Per-instance цвет здесь — МНОЖИТЕЛЬ состояния
+  // (highlight/cleanup/затемнение-входа), а НЕ абсолютный цвет: базовые цвета
+  // (графит-корпус, цветная корона, сталь/глянец) держат материалы группы. Decor-фейд
+  // множит `material.color` на эталонный `designed`-цвет (см. dimBuilding ниже).
+  interface BuildItem {
+    b: BuildingAcc;
+    /** d3-глубина здания: вложенный домик — глубина владельца +1; файл верхнего — 1. */
+    depth: number;
+  }
+  interface BuildGroup {
+    mesh: InstancedMesh;
+    /** Локальный индекс инстанса в меше = позиция в `items`/`real`/`pick`. */
+    items: BuildItem[];
+    real: Matrix4[];
+    pick: PickInfo[];
+    /** Эталонные цвета материалов группы (по группам геометрии) — для decor-фейда. */
+    designed: Color[];
+  }
+  const buildGroups: BuildGroup[] = [];
+  const buildGroupByMesh = new Map<InstancedMesh, BuildGroup>();
 
   if (buildings.length > 0) {
-    buildingMesh = new InstancedMesh(
-      new BoxGeometry(1, 1, 1),
-      new MeshLambertMaterial(),
-      buildings.length,
-    );
-    buildings.forEach((b, i) => {
-      const box = layoutToWorld(b.rect, b.height);
-      // Домик стоит на ПОЛУ своей папки (верх её плиты-постамента), а не на земле —
-      // иначе он провалился бы в плиту. Файл верхнего уровня сидит на земле (floor=0).
-      const floor =
-        b.districtIdx !== null ? districts[b.districtIdx].contentFloor : 0;
-      dummy.position.set(box.centerX, floor + box.height / 2, box.centerZ);
-      dummy.scale.set(box.width, box.height, box.depth);
-      dummy.updateMatrix();
-      buildingReal[i] = dummy.matrix.clone();
-      buildingMesh!.setMatrixAt(i, dummy.matrix);
-      buildingMesh!.setColorAt(i, color.set(baseBuildingColor(b.node)));
-
-      // Внутри папки клик ведёт в РОДИТЕЛЬСКИЙ район (как и клик по плите);
-      // файл верхнего уровня — это select (drillTarget = он сам, не папка).
-      const drillTarget =
-        b.districtIdx !== null ? districts[b.districtIdx].node : b.node;
-      buildingPick[i] = { node: b.node, drillTarget };
-    });
-    buildingMesh.instanceMatrix.needsUpdate = true;
-    if (buildingMesh.instanceColor)
-      buildingMesh.instanceColor.needsUpdate = true;
-    group.add(buildingMesh);
+    // Разложить здания по категориям, сохранив исходный порядок (детерминизм раскладки).
+    const byCat = new Map<Category, BuildingAcc[]>();
+    for (const b of buildings) {
+      const arr = byCat.get(b.node.category);
+      if (arr) arr.push(b);
+      else byCat.set(b.node.category, [b]);
+    }
+    for (const [cat, list] of byCat) {
+      const def = makeBuildingDef(cat);
+      const mesh = new InstancedMesh(def.geometry, def.materials, list.length);
+      const items: BuildItem[] = [];
+      const real: Matrix4[] = [];
+      const pick: PickInfo[] = [];
+      list.forEach((b, i) => {
+        const box = layoutToWorld(b.rect, b.height);
+        // Домик стоит на ПОЛУ своей папки (верх её плиты-постамента), не на земле —
+        // иначе провалился бы в плиту. Файл верхнего уровня сидит на земле (floor=0).
+        const floor =
+          b.districtIdx !== null ? districts[b.districtIdx].contentFloor : 0;
+        dummy.position.set(box.centerX, floor + box.height / 2, box.centerZ);
+        dummy.scale.set(box.width, box.height, box.depth);
+        dummy.updateMatrix();
+        real[i] = dummy.matrix.clone();
+        mesh.setMatrixAt(i, dummy.matrix);
+        // Внутри папки клик ведёт в РОДИТЕЛЬСКИЙ район (как и клик по плите);
+        // файл верхнего уровня — это select (drillTarget = он сам, не папка).
+        const drillTarget =
+          b.districtIdx !== null ? districts[b.districtIdx].node : b.node;
+        pick[i] = { node: b.node, drillTarget };
+        items[i] = {
+          b,
+          depth:
+            b.districtIdx !== null ? districts[b.districtIdx].d3depth + 1 : 1,
+        };
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      const g: BuildGroup = {
+        mesh,
+        items,
+        real,
+        pick,
+        designed: def.designedColors,
+      };
+      buildGroups.push(g);
+      buildGroupByMesh.set(mesh, g);
+      group.add(mesh);
+    }
   }
 
   // --- Облик папок: каждая папка — плита-постамент (И обводка, И пол под содержимым).
@@ -869,10 +895,6 @@ export function buildLevel(
     excludedIdx !== null &&
     (j === excludedIdx || districts[j].topIdx === excludedIdx);
 
-  /** d3-глубина здания: вложенный домик — глубина владельца +1; файл верхнего уровня — 1. */
-  const buildingDepth = (b: BuildingAcc): number =>
-    b.districtIdx !== null ? districts[b.districtIdx].d3depth + 1 : 1;
-
   const view: CityView = {
     updateLOD() {
       // Детализация по глубине статична (§II.3.2) — покадрово делать нечего.
@@ -880,14 +902,17 @@ export function buildLevel(
     pickMeshes() {
       if (isDecor) return []; // декор не кликабелен (docs: формы без raycast)
       const out: InstancedMesh[] = [];
-      if (buildingMesh) out.push(buildingMesh);
+      // Сначала здания (по категориям), затем контейнеры — порядок стабилен (тесты
+      // берут контейнеры с конца). Зданий несколько мешей (по одному на категорию).
+      for (const g of buildGroups) out.push(g.mesh);
       if (domeMesh) out.push(domeMesh); // +1 купола
       if (baseMesh) out.push(baseMesh); // плиты-постаменты +1/+2
       if (baseMatteMesh) out.push(baseMatteMesh); // плиты-постаменты +3
       return out;
     },
     resolvePick(mesh, instanceId) {
-      if (mesh === buildingMesh) return buildingPick[instanceId] ?? null;
+      const bg = buildGroupByMesh.get(mesh as InstancedMesh);
+      if (bg) return bg.pick[instanceId] ?? null;
       if (mesh === domeMesh || mesh === baseMesh || mesh === baseMatteMesh)
         return districtPick[instanceId] ?? null;
       return null;
@@ -906,10 +931,24 @@ export function buildLevel(
     const mat = mesh.material as MeshStandardMaterial | MeshLambertMaterial;
     mat.color.setRGB(1, 1, 1);
   }
+  /**
+   * Decor-фейд здания: у категорийного меша цвет держат МАТЕРИАЛЫ групп (графит/
+   * корона/сталь/глянец), а per-instance цвет — множитель состояния. Поэтому фейд
+   * декора множит цвет КАЖДОГО под-материала на его эталон `designed[g]·f` (а не
+   * `setRGB(f,f,f)`, как у одноматериальных контейнеров). `f=1` — эталонные цвета.
+   */
+  function dimBuilding(g: BuildGroup, f: number): void {
+    const mats = g.mesh.material as Material[];
+    for (let i = 0; i < mats.length; i++) {
+      (mats[i] as MeshStandardMaterial).color
+        .copy(g.designed[i])
+        .multiplyScalar(f);
+    }
+  }
   /** Применить текущий `decorDim` ко всем мешам (только цвет, без матриц) — для
    *  покадрового кросс-фейда декора (дёшево, матрицы не трогаем). */
   function recolorDecor(): void {
-    if (buildingMesh) dimMesh(buildingMesh, decorDim);
+    for (const g of buildGroups) dimBuilding(g, decorDim);
     if (domeMesh) dimMesh(domeMesh, decorDim);
     if (baseMesh) dimMesh(baseMesh, decorDim);
     if (baseMatteMesh) dimMesh(baseMatteMesh, decorDim);
@@ -920,16 +959,17 @@ export function buildLevel(
     ground.visible = false;
     roadDots.visible = false;
 
-    if (buildingMesh) {
-      buildings.forEach((b, i) => {
+    for (const g of buildGroups) {
+      g.items.forEach((it, i) => {
         // Скрыто, если в исключённом поддереве ЛИБО глубже LOD-бюджета (§4).
         const hide =
-          (b.topDistrictIdx !== null && b.topDistrictIdx === excludedIdx) ||
-          buildingDepth(b) > decorBudget;
-        buildingMesh!.setMatrixAt(i, hide ? ZERO_MATRIX : buildingReal[i]);
+          (it.b.topDistrictIdx !== null &&
+            it.b.topDistrictIdx === excludedIdx) ||
+          it.depth > decorBudget;
+        g.mesh.setMatrixAt(i, hide ? ZERO_MATRIX : g.real[i]);
       });
-      buildingMesh.instanceMatrix.needsUpdate = true;
-      dimMesh(buildingMesh, decorDim);
+      g.mesh.instanceMatrix.needsUpdate = true;
+      dimBuilding(g, decorDim);
     }
     if (domeMesh && baseMesh && baseMatteMesh) {
       // Вырожденные по облику инстансы и так = ZERO (domeReal/baseReal/baseMatteReal).
@@ -967,12 +1007,10 @@ export function buildLevel(
     ground.visible = true;
     roadDots.visible = true;
 
-    if (buildingMesh) {
-      buildings.forEach((_, i) =>
-        buildingMesh!.setMatrixAt(i, buildingReal[i]),
-      );
-      buildingMesh.instanceMatrix.needsUpdate = true;
-      whiten(buildingMesh);
+    for (const g of buildGroups) {
+      g.items.forEach((_, i) => g.mesh.setMatrixAt(i, g.real[i]));
+      g.mesh.instanceMatrix.needsUpdate = true;
+      dimBuilding(g, 1); // вернуть эталонные цвета материалов групп
     }
     if (domeMesh && baseMesh && baseMatteMesh) {
       districts.forEach((_, j) => {
@@ -1042,17 +1080,15 @@ export function buildLevel(
    *  Level.setEnterDim. Только per-instance цвет (×factor), без матриц. */
   function setEnterDim(excludePath: string, factor: number): void {
     const exIdx = districtIndexByPath.get(excludePath) ?? null;
-    if (buildingMesh) {
-      buildings.forEach((b, i) => {
+    for (const g of buildGroups) {
+      g.items.forEach((it, i) => {
         // Раскрываемое поддерево остаётся ярким (его подхватит новый активный).
-        if (b.topDistrictIdx !== null && b.topDistrictIdx === exIdx) return;
-        buildingMesh!.setColorAt(
-          i,
-          color.set(baseBuildingColor(b.node)).multiplyScalar(factor),
-        );
+        if (it.b.topDistrictIdx !== null && it.b.topDistrictIdx === exIdx)
+          return;
+        // Цвет здания — множитель состояния: белый×factor затемняет периметр.
+        g.mesh.setColorAt(i, color.setRGB(factor, factor, factor));
       });
-      if (buildingMesh.instanceColor)
-        buildingMesh.instanceColor.needsUpdate = true;
+      if (g.mesh.instanceColor) g.mesh.instanceColor.needsUpdate = true;
     }
     if (domeMesh && baseMesh && baseMatteMesh) {
       districts.forEach((d, j) => {
@@ -1145,18 +1181,17 @@ export function buildLevel(
 
   /**
    * Перекрасить per-instance цвета всех мешей по правилу `paint(node, baseColor)`.
-   * База: здания — цвет файла; купол — нейтральное стекло; ободок — цвет района;
-   * заглушка — серый, по узлу её +2-района. Купол/ободок/заглушки одного района
-   * красятся согласованно (узел района).
+   * База: ЗДАНИЯ — белый `0xffffff` (per-instance цвет здания = МНОЖИТЕЛЬ состояния
+   * поверх материалов категории: highlight/cleanup гасят/красят домножением); купол —
+   * нейтральное стекло; ободок/плита — цвет района (абсолют). Купол/ободок/заглушки
+   * одного района красятся согласованно (узел района).
    */
   function paintAll(paint: (node: ScanNode, base: number) => Color): void {
-    if (buildingMesh) {
-      buildings.forEach((b, i) => {
-        const c = paint(b.node, baseBuildingColor(b.node));
-        buildingMesh!.setColorAt(i, c);
+    for (const g of buildGroups) {
+      g.items.forEach((it, i) => {
+        g.mesh.setColorAt(i, paint(it.b.node, 0xffffff));
       });
-      if (buildingMesh.instanceColor)
-        buildingMesh.instanceColor.needsUpdate = true;
+      if (g.mesh.instanceColor) g.mesh.instanceColor.needsUpdate = true;
     }
     if (domeMesh && baseMesh && baseMatteMesh) {
       // Цвет держим на ВСЕХ инстансах обоих плит-мешей (на случай смены глубины/

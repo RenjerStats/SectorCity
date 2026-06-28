@@ -22,7 +22,14 @@ import {
 } from "./navigator";
 import { buildLevel, CITY_SPAN, PREVIEW_MAX_DEPTH } from "./city";
 import { spanFromPlacement } from "./transform";
-import { dir, file, isHidden, matrixAt, visibleCount } from "./test-fixtures";
+import {
+  dir,
+  file,
+  isHidden,
+  matrixAt,
+  pickRoles,
+  sumVisible,
+} from "./test-fixtures";
 
 /** Фейковая ручка сцены: flyTo мгновенно «прилетает» и зовёт onArrive синхронно. */
 function fakeHandle(): SceneHandle {
@@ -73,7 +80,8 @@ function buildingsVisibleAt(
   nav.updateLOD();
   const view = activeView(handle.content);
   expect(view).not.toBeNull();
-  return visibleCount(view!.pickMeshes()[0]); // [building, dome]
+  // Зданий несколько мешей (по категории) — суммируем видимые.
+  return sumVisible(pickRoles(view!).buildings);
 }
 
 const FAR = new Vector3(0, 5000, 5000);
@@ -162,7 +170,7 @@ describe("createNavigator: reset / drill / up", () => {
     // ДО drill (root активен) держим его baseMesh и индекс плиты /a (декор не пикается,
     // но ссылка на меш переживает смену облика — setDecor мутирует его на месте).
     const view = activeView(handle.content)!;
-    const baseMesh = view.pickMeshes()[2]; // [building, dome, base, baseMatte]
+    const baseMesh = pickRoles(view).base; // плита-постамент района
     let idxA = -1;
     for (let i = 0; i < baseMesh.count; i++) {
       const info = view.resolvePick(baseMesh, i);
@@ -194,7 +202,7 @@ describe("createNavigator: reset / drill / up", () => {
     const t = tree();
     nav.reset(t, "root");
 
-    const before = visibleCount(activeView(handle.content)!.pickMeshes()[0]);
+    const before = sumVisible(pickRoles(activeView(handle.content)!).buildings);
 
     const nodeA = t[0];
     await nav.drill(nodeA, nodeA.children!, 0);
@@ -202,7 +210,7 @@ describe("createNavigator: reset / drill / up", () => {
 
     expect(nav.inspect().activePath).toBe("root");
     expect(nav.inspect().decor).toEqual([]);
-    const after = visibleCount(activeView(handle.content)!.pickMeshes()[0]);
+    const after = sumVisible(pickRoles(activeView(handle.content)!).buildings);
     expect(after).toBe(before); // та же геометрия root (промоут реального уровня)
 
     nav.dispose();
@@ -214,7 +222,7 @@ describe("createNavigator: reset / drill / up", () => {
     const t = tree();
     nav.reset(t, "root");
 
-    const before = visibleCount(activeView(handle.content)!.pickMeshes()[0]);
+    const before = sumVisible(pickRoles(activeView(handle.content)!).buildings);
 
     const nodeA = t[0];
     await nav.drill(nodeA, nodeA.children!, 0);
@@ -230,7 +238,7 @@ describe("createNavigator: reset / drill / up", () => {
     await nav.up(0);
     expect(nav.inspect().activePath).toBe("root");
     expect(nav.inspect().decor).toEqual([]);
-    const after = visibleCount(activeView(handle.content)!.pickMeshes()[0]);
+    const after = sumVisible(pickRoles(activeView(handle.content)!).buildings);
     expect(after).toBe(before);
 
     nav.dispose();

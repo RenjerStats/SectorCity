@@ -8,13 +8,7 @@
  * (позиция оверлея покадрово) пишется в DOM императивно, в обход стора.
  */
 import { atom, computed } from "nanostores";
-import type {
-  AggMode,
-  Category,
-  NodeId,
-  ScanNode,
-  ScanProgress,
-} from "../ipc/contract";
+import type { Category, NodeId, ScanNode, ScanProgress } from "../ipc/contract";
 
 export type AppMode =
   | { kind: "scanning"; progress: number }
@@ -109,25 +103,18 @@ export const filterActive = computed(
  * (в отличие от фильтра-подсветки, который ничего не убирает). При изменении
  * `Scene` перезапрашивает текущий уровень и пересобирает город (с debounce).
  *
- * - `relative` (по умолчанию): `fraction` — доля объёма папки (детерминированно,
- *   независимо от ракурса камеры); применяется на каждом уровне рекурсивно, включая
- *   превью (см. контракт `AggSpec`). Узел мельче `fraction`·сумма-уровня → «Прочее».
- * - `absolute`: `minBytes` — точный порог; только текущий уровень, превью —
- *   относительный фолбэк по `fraction`.
+ * Порог — `fraction`, доля объёма папки (детерминированно, независимо от ракурса
+ * камеры); применяется на каждом уровне рекурсивно, включая превью (см. контракт
+ * `AggSpec`). Узел мельче `fraction`·сумма-уровня → «Прочее».
  */
 export interface AggSettings {
-  mode: AggMode;
   /** Доля объёма папки 0.01–0.20 (ползунок 1–20%): тайлы мельче сворачиваются. */
   fraction: number;
-  /** Порог абсолютного режима, байты. */
-  minBytes: number;
 }
 
-/** Порог по умолчанию: относительный, 3% от объёма папки (сворачивает мелочь-точки). */
+/** Порог по умолчанию: 3% от объёма папки (сворачивает мелочь-точки). */
 export const aggSettings = atom<AggSettings>({
-  mode: "relative",
   fraction: 0.03,
-  minBytes: 1024 * 1024, // 1 МБ — стартовое значение абсолютного режима
 });
 
 /**

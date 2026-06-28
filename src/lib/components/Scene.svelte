@@ -85,6 +85,9 @@
   const DRILL_MS = 500;
   /** Дебаунс пересборки города при движении ползунка порога (≈ось «на лету»). */
   const AGG_DEBOUNCE_MS = 150;
+  /** Глубина превью с бэка: реальная застройка до +2, заглушки-«теплицы» — на +3
+   *  (см. `PREVIEW_MAX_DEPTH` в city.ts). */
+  const PREVIEW_DEPTH = 3;
 
   /** Текущие параметры агрегации из стора → контракт `AggSpec` для `getLevel`.
    *  Относительный режим — прямая доля объёма папки (детерминированно, без зависимости
@@ -92,9 +95,7 @@
   function aggSpec(): AggSpec {
     const a = aggSettings.get();
     return {
-      mode: a.mode,
       fraction: a.fraction,
-      minBytes: a.minBytes,
       topNCap: TOP_N_CAP,
     };
   }
@@ -284,7 +285,7 @@
     const crumbs = breadcrumbs.get();
     if (crumbs.length === 0) return;
     const path = crumbs[crumbs.length - 1].path;
-    const nodes = await getLevel(path, aggSpec(), 2);
+    const nodes = await getLevel(path, aggSpec(), PREVIEW_DEPTH);
     currentUnfilteredNodes = nodes;
     const filtered = getFilteredNodes(nodes);
     nav.rebuildActive(filtered);
@@ -319,7 +320,7 @@
    * дальше чем на уровень). Возвращает число узлов (0 → пусто, нечего показывать). */
   async function loadRoot(path: string): Promise<number> {
     // depth=2: каждый район несёт превью своих детей → вложенный treemap + LOD.
-    const nodes = await getLevel(path, aggSpec(), 2);
+    const nodes = await getLevel(path, aggSpec(), PREVIEW_DEPTH);
     currentUnfilteredNodes = nodes;
     const filtered = getFilteredNodes(nodes);
     nav?.reset(filtered, path);
@@ -350,8 +351,13 @@
 
     // LOD активного уровня: покадрово по позиции камеры (дёшево, переключение
     // только на смене состояния). Навигатор знает, какой уровень активен.
+    let lastFrameT = performance.now();
     const offLod = handle.onFrame(() => {
+      const now = performance.now();
+      const dt = now - lastFrameT;
+      lastFrameT = now;
       nav?.updateLOD();
+      nav?.updateFade(dt); // кросс-фейд градиента затемнения декора (план §7.1)
     });
 
     // Позицию окон над зданием ставим покадрово императивно (вне реконсиляции
@@ -591,7 +597,7 @@
     hoveredNode.set(null);
 
     // Дети района (превью +1) — это содержимое нового активного уровня.
-    const childNodes = await getLevel(node.path, aggSpec(), 2);
+    const childNodes = await getLevel(node.path, aggSpec(), PREVIEW_DEPTH);
     currentUnfilteredNodes = childNodes;
     const filtered = getFilteredNodes(childNodes);
     await nav.drill(node, filtered, DRILL_MS);
@@ -610,6 +616,22 @@
     );
   }
 
+  /** §6: после бесшовного `up` дочитать ОДИН дальний декор-слой, если буфер контекста
+   * просел ниже лимита (глубокий drill срезал дальние предки). Источник данных —
+   * цепочка крошек: родитель самого дальнего удерживаемого уровня. Асинхронно и
+   * fire-and-forget — твин камеры не блокируем (план §6). */
+  async function replenishFarDecor() {
+    if (!nav) return;
+    const ref = nav.farthestHeldPath();
+    if (!ref) return; // буфер полон
+    const crumbs = breadcrumbs.get();
+    const i = crumbs.findIndex((c) => c.path === ref);
+    if (i <= 0) return; // дальше корня предков нет
+    const parentPath = crumbs[i - 1].path;
+    const nodes = await getLevel(parentPath, aggSpec(), PREVIEW_DEPTH);
+    nav.appendFarAncestor(parentPath, getFilteredNodes(nodes));
+  }
+
   /** Перейти к крошке по индексу. Подъём ровно на родителя — бесшовный (промоут
    * декора); прыжок дальше — обычная пересборка уровня (origin сбрасывается). */
   async function goToCrumb(index: number) {
@@ -621,12 +643,14 @@
     hoveredNode.set(null);
     interaction?.clearSelection(); // выбор уровня-источника больше не валиден
 
-    const parentNodesPromise = getLevel(crumb.path, aggSpec(), 2);
+    const parentNodesPromise = getLevel(crumb.path, aggSpec(), PREVIEW_DEPTH);
 
+    let didSeamlessUp = false;
     if (index === $breadcrumbs.length - 2 && nav.canUp(crumb.path)) {
       const parentNodes = await parentNodesPromise;
       currentUnfilteredNodes = parentNodes;
       await nav.up(DRILL_MS);
+      didSeamlessUp = true;
       setSummary(parentNodes, crumb.path);
       updateFilterEmpty(parentNodes);
     } else {
@@ -645,6 +669,8 @@
         ? { kind: "cleanup", path: crumb.path }
         : { kind: "idle", path: crumb.path },
     );
+    // Бесшовный подъём мог оголить дальний контекст — дочитать его (§6), не блокируя.
+    if (didSeamlessUp) void replenishFarDecor();
   }
 
   function cancel() {
