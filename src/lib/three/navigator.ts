@@ -28,7 +28,7 @@
  * (`Scene.svelte`), навигатор отвечает за геометрию, камеру и rebase. С DOM не
  * общается — мост пикинга кладёт в `content.userData` (см. `activeView`).
  */
-import type { Group } from "three";
+import { type Group, Vector3 } from "three";
 import { Easing } from "@tweenjs/tween.js";
 import type { ScanNode } from "../ipc/contract";
 import type { SceneHandle } from "./scene";
@@ -36,6 +36,7 @@ import { INITIAL_CAMERA_POS, INITIAL_TARGET } from "./home";
 import {
   buildLevel,
   CITY_SPAN,
+  createDomeFlight,
   PREVIEW_MAX_DEPTH,
   type CityView,
   type Level,
@@ -334,6 +335,23 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     const enterDome = fromActive.extractDome(node.path);
     enterDome?.setProgress(0);
 
+    // Новый активный строим ЗАРАНЕЕ (переиспользуем на свопе) — нужны снимки его
+    // куполов +1, чтобы дочерние папки «надевали» купола (опускались) синхронно с
+    // зумом, а не появлялись мгновенно на свопе («из ниоткуда»). Купола-«рой» кладём
+    // в кадр раскрываемого района (подобие `G`: scale `g.s`, центр `C`), поэтому они
+    // садятся ровно на постаменты детей и на свопе совпадают с реальными куполами
+    // `next` (origin shift: G-кадр из camTo = identity из P, см. шапку).
+    const childSpan = spanFromPlacement(g);
+    levelSpans.set(node.path, childSpan); // для возможного дочита на `up` (§6)
+    const next = buildLevel(childNodes, childSpan, node.path);
+    const childDomes = createDomeFlight(
+      next.childDomeDescriptors(),
+      g.s,
+      new Vector3(g.cx, g.cy, g.cz),
+    );
+    childDomes.setProgress(1); // старт: подняты и растворены (как было «пусто»)
+    content.add(childDomes.group);
+
     setInteractive(false);
     await handle.flyTo(
       camTo,
@@ -341,9 +359,6 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
       ms,
       () => {
         // origin shift в кадре завершения (см. шапку): следующий render нормирован.
-        const childSpan = spanFromPlacement(g);
-        levelSpans.set(node.path, childSpan); // для возможного дочита на `up` (§6)
-        const next = buildLevel(childNodes, childSpan, node.path);
         content.add(next.group); // канонически, identity
         applyAppearance(next); // фильтр + вид очистки переживают drill
 
@@ -372,6 +387,7 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
           dimShown: targetDim, // уже на цели — `updateFade` тут ничего не доводит
         });
         enterDome?.dispose(); // купол уже снят анимацией; убрать временный меш
+        childDomes.dispose(); // купола детей сели; дальше их несёт реальный `next`
 
         // Дроп: слои за `S_drop` (бюджет 0 → уже ничего не рисуют, дроп невидим) и за
         // потолком `N_MAX` (память). S монотонна по глубине → режем хвост. На `up`
@@ -400,10 +416,12 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
       (p) => {
         // Сопутствующие анимации drill — на том же отрезке, что и зум: периметр
         // плавно уходит в декор-цвет (раскрываемое поддерево остаётся ярким), купол
-        // раскрываемого района уезжает вверх и тает.
+        // раскрываемого района уезжает вверх и тает, а купола дочерних папок
+        // «надеваются» — опускаются на свои постаменты (зеркало `enterDome`).
         const e = Easing.Cubic.InOut(p);
         fromActive.setEnterDim(node.path, 1 + (targetDim - 1) * e);
         enterDome?.setProgress(p);
+        childDomes.setProgress(1 - p);
       },
     );
   }
@@ -436,6 +454,18 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     const upDome = parent.extractDome(child.path);
     upDome?.setProgress(1);
 
+    // Зеркало drill: собственные купола +1 уходящего уровня «снимаются» — поднимаются
+    // и тают синхронно с отъездом камеры (в кадре активного, identity), вместо
+    // мгновенного исчезновения на свопе. Реальные купола прячем, анимирует «рой».
+    const childDomes = createDomeFlight(
+      child.childDomeDescriptors(),
+      1,
+      new Vector3(0, 0, 0),
+    );
+    childDomes.setProgress(0); // старт: на месте, непрозрачны
+    child.setChildDomesShown(false);
+    content.add(childDomes.group);
+
     setInteractive(false);
     await handle.flyTo(
       camTo,
@@ -443,6 +473,7 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
       ms,
       () => {
         // Уходящий активный (центр кадра) убираем — его место займёт превью в родителе.
+        childDomes.dispose(); // купола сняты анимацией; убрать временный «рой»
         disposeLevel(child);
 
         // Весь стек получает `G` сверху (ровно обратное drill). Ближайший декор при
@@ -481,10 +512,12 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
       },
       (p) => {
         // Сопутствующие анимации up — на отрезке зума: родитель разгорается из декора
-        // в активный облик, купол покидаемого района опускается на место и проявляется.
+        // в активный облик, купол покидаемого района опускается на место и проявляется,
+        // а собственные купола уходящего уровня «снимаются» — уезжают вверх и тают.
         const e = Easing.Cubic.InOut(p);
         parent.setDecorDim(parentDimStart + (1 - parentDimStart) * e);
         upDome?.setProgress(1 - p);
+        childDomes.setProgress(p);
       },
     );
   }

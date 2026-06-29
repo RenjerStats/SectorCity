@@ -57,6 +57,7 @@ import {
   MeshStandardMaterial,
   Object3D,
   PlaneGeometry,
+  Vector3,
 } from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { hierarchy, treemap, treemapSquarify } from "d3-hierarchy";
@@ -151,14 +152,16 @@ const DOME_ROUND_RADIUS = 0.06;
 const DOME_ROUND_SEGMENTS = 3;
 /**
  * Анимация снятия купола при drill (и обратного «надевания» при up, §II.3.6):
- * купол раскрываемого района уезжает вверх и растворяется ЗА ВЕСЬ отрезок зума
- * (`extractDome`). На сколько своих высот он уходит и кривые подъёма/растворения —
- * подобраны «не сухими» (нелинейными): подъём — easeOutCubic (резвый старт, мягкое
- * замедление), растворение — smoothstep на хвосте отрезка (держит стекло читаемым,
- * затем плавно в ноль — «плавное исчезновение в конце»).
+ * купол раскрываемого района уезжает вверх ЗА ВЕСЬ отрезок зума (`extractDome`), но
+ * РАСТВОРЯЕТСЯ быстрее — полностью прозрачен уже к `DOME_FADE_END` (середине), чтобы
+ * стекло не «висело» полупрозрачным до конца зума. Кривые «не сухие» (нелинейные):
+ * подъём — easeOutCubic (резвый старт, мягкое замедление), растворение — smoothstep
+ * на отрезке `[DOME_FADE_START, DOME_FADE_END]` (держит стекло читаемым в начале,
+ * затем быстро в ноль).
  */
 const DOME_LIFT_FACTOR = 1.1; // подъём на 110 % собственной высоты купола
-const DOME_FADE_START = 0.25; // доля отрезка, после которой стекло начинает таять
+const DOME_FADE_START = 0.2; // доля отрезка, после которой стекло начинает таять
+const DOME_FADE_END = 0.5; // доля отрезка, к которой стекло полностью прозрачно
 
 /**
  * Срез глубины превью (d3-глубина уровня): контейнеры до этой глубины несут
@@ -238,6 +241,33 @@ export interface DrillDome {
 }
 
 /**
+ * Геометрия одного купола +1 для анимируемого «роя» (`createDomeFlight`): чистое
+ * подобие (scale+translate, без вращений) в координатах своего уровня. Снимок матрицы
+ * `domeReal[j]` через `Level.childDomeDescriptors` — навигатор по нему синтезирует
+ * временные купола детей и гонит их «надевание»/«снятие» синхронно с зумом.
+ */
+export interface DomeDescriptor {
+  sx: number;
+  sy: number;
+  sz: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * Анимируемый «рой» куполов (план/vision §II.3.6) — расширение `DrillDome` на
+ * НЕСКОЛЬКО куполов сразу: домики дочерних папок при drill «надевают» купола
+ * (опускаются), а при up — «снимают» (поднимаются). Живёт в своей `group`, которую
+ * навигатор кладёт в `content` и трансформирует подобием района (drill — кадр района
+ * `G`, up — identity уходящего уровня).
+ */
+export interface DomeFlight extends DrillDome {
+  /** Контейнер временных куполов; навигатор задаёт его scale/position (similarity). */
+  readonly group: Group;
+}
+
+/**
  * Уровень города — самостоятельная `Group` с канонической раскладкой. Размещение
  * в мир (в прямоугольник района родителя) задаётся трансформом группы извне
  * (`navigator.ts`). Активный уровень рисуется полностью и кликабелен; декор —
@@ -299,6 +329,19 @@ export interface Level {
    * трансформом-подобием (и в активном, и в декор-облике).
    */
   extractDome(path: string): DrillDome | null;
+  /**
+   * Снимки геометрии всех куполов +1 этого уровня (`DomeDescriptor`, в координатах
+   * уровня). Навигатор по ним синтезирует анимируемый «рой» (`createDomeFlight`):
+   * при drill купола дочерних папок будущего активного уровня «надеваются», при up —
+   * собственные купола уходящего уровня «снимаются». Папки без купола (не +1) опущены.
+   */
+  childDomeDescriptors(): DomeDescriptor[];
+  /**
+   * Показать/скрыть РЕАЛЬНЫЕ инстансы куполов +1 (не трогая плиты/застройку). Нужно на
+   * up: пока «рой» (`createDomeFlight`) анимирует снятие куполов уходящего уровня, его
+   * настоящие купола прячем, иначе они дублировали бы анимируемые. No-op без куполов.
+   */
+  setChildDomesShown(shown: boolean): void;
   /**
    * Затемнение «на входе» (drill): за время зума периметр уровня плавно уходит в
    * декор-цвет (`factor`: `1` — полный цвет, ниже — к фону), а раскрываемое поддерево
@@ -625,6 +668,131 @@ function ringBaseColor(node: ScanNode): number {
   return node.flags.includes("aggregated") ? AGGREGATE_COLOR : DOME_RING_COLOR;
 }
 
+/** Единичный скруглённый куб купола — общий для инстанс-меша и анимируемых «роёв». */
+function makeDomeGeometry(): RoundedBoxGeometry {
+  return new RoundedBoxGeometry(
+    1,
+    1,
+    1,
+    DOME_ROUND_SEGMENTS,
+    DOME_ROUND_RADIUS,
+  );
+}
+
+/**
+ * Материал стеклянного купола (§II.3.7): настоящее матовое стекло (`transmission` +
+ * `roughness` морозят прошедший свет; требует env-map, см. `scene.ts`). `flight=false`
+ * — для общего `domeMesh` (depthWrite:true решает купол-vs-купол пофрагментно, цвет
+ * per-instance). `flight=true` — для анимируемого «снятого» купола: полупрозрачный,
+ * НЕ пишет глубину (уезжает над застройкой), цвет стекла фиксирован (не per-instance).
+ */
+function makeDomeMaterial(flight: boolean): MeshPhysicalMaterial {
+  const mat = new MeshPhysicalMaterial({
+    metalness: 0,
+    roughness: GLASS_ROUGHNESS,
+    transmission: 1,
+    thickness: 6,
+    ior: 1.45,
+    transparent: true,
+    depthWrite: !flight,
+  });
+  if (flight) mat.color.set(GLASS_COLOR);
+  return mat;
+}
+
+/**
+ * Кадр анимации одного «снятого» купола по прогрессу `prog` (`0` — на месте/непрозрачен,
+ * `1` — поднят на `liftBy` и растворён). Подъём — easeOutCubic (резвый старт, мягкое
+ * замедление), растворение — smoothstep на хвосте отрезка (стекло читаемо, затем плавно
+ * в ноль). Навигатор кормит `prog` (или `1−prog`) синхронно с зумом — отсюда «надевание»
+ * (drill) и «снятие» (up) — это одна кривая в разные стороны.
+ */
+function applyDomeProgress(
+  mesh: Mesh,
+  mat: MeshPhysicalMaterial,
+  baseY: number,
+  liftBy: number,
+  prog: number,
+): void {
+  const t = prog < 0 ? 0 : prog > 1 ? 1 : prog;
+  mesh.position.y = baseY + liftBy * (1 - (1 - t) ** 3); // easeOutCubic-подъём
+  mat.opacity = domeOpacity(t);
+}
+
+/**
+ * Прозрачность купола по прогрессу `t∈[0,1]` (`0` — непрозрачен, к `DOME_FADE_END` —
+ * полностью прозрачен): smoothstep на отрезке `[DOME_FADE_START, DOME_FADE_END]`,
+ * дальше держится на нуле. Растворение быстрее самого подъёма (см. шапку `DOME_*`).
+ */
+function domeOpacity(t: number): number {
+  return (
+    1 - smoothstep01((t - DOME_FADE_START) / (DOME_FADE_END - DOME_FADE_START))
+  );
+}
+
+/**
+ * Синтезировать анимируемый «рой» куполов из снимков `descs` (план/vision §II.3.6):
+ * отдельные полупрозрачные меши в собственной `group`, которую навигатор размещает
+ * подобием (`scale`/`position`) — кадром района при drill (купола детей «надеваются»
+ * в кадре раскрываемого района) либо identity при up (купола уходящего уровня
+ * «снимаются»). `setProgress` гонит все купола разом (та же кривая, что у `extractDome`),
+ * `dispose` снимает группу с родителя и освобождает GPU-ресурсы.
+ */
+export function createDomeFlight(
+  descs: DomeDescriptor[],
+  scale: number,
+  position: Vector3,
+): DomeFlight {
+  const group = new Group();
+  group.scale.setScalar(scale);
+  group.position.copy(position);
+  if (descs.length === 0) {
+    return {
+      group,
+      setProgress() {},
+      dispose() {
+        group.parent?.remove(group);
+      },
+    };
+  }
+  // Один InstancedMesh на весь рой (а не меш на купол): все купола едут по одной кривой,
+  // прозрачность общая (`material.opacity`), различается лишь подъём по Y — это идеально
+  // ложится на инстансинг (1 draw call, 1 дорогой transmission-материал вместо N).
+  const geometry = makeDomeGeometry();
+  const material = makeDomeMaterial(true);
+  const mesh = new InstancedMesh(geometry, material, descs.length);
+  mesh.renderOrder = 3; // поверх непрозрачных, как и обычный купол
+  mesh.frustumCulled = false; // инстансы едут вверх — bbox не пересоберём покадрово
+  group.add(mesh);
+
+  const dummy = new Object3D();
+  const liftBy = descs.map((d) => d.sy * DOME_LIFT_FACTOR);
+  const writeMatrices = (rise: number): void => {
+    descs.forEach((d, i) => {
+      dummy.position.set(d.x, d.y + liftBy[i] * rise, d.z);
+      dummy.scale.set(d.sx, d.sy, d.sz);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+  };
+
+  return {
+    group,
+    setProgress(prog) {
+      const t = prog < 0 ? 0 : prog > 1 ? 1 : prog;
+      writeMatrices(1 - (1 - t) ** 3); // easeOutCubic-подъём (как у extractDome)
+      material.opacity = domeOpacity(t); // общий для роя — все тают одной кривой
+    },
+    dispose() {
+      geometry.dispose();
+      material.dispose();
+      group.clear();
+      group.parent?.remove(group);
+    },
+  };
+}
+
 /**
  * Построить уровень `nodes` в собственной `Group` (канонически, в прямоугольнике
  * `span`). Группа создаётся в identity — размещение в мир задаёт навигатор.
@@ -760,25 +928,13 @@ export function buildLevel(
     // дешёвый `transparent+opacity` физически НЕ размывает содержимое (только гасит
     // альфой). `transmission` преломляет фон, `roughness` размывает его по мипам
     // transmission-таргета → «мороз». Требует env-map (см. scene.ts). Тинт держим
-    // per-instance (GLASS_COLOR), material.color белый.
+    // per-instance (GLASS_COLOR), material.color белый. depthWrite:true (в
+    // `makeDomeMaterial(false)`) решает купол-vs-купол пофрагментно (иначе порядок
+    // буфера красил бы дальние поверх ближних при повороте камеры); просвечивание
+    // держится тем, что домики внутри попадают в transmission-буфер ДО купола.
     domeMesh = new InstancedMesh(
-      new RoundedBoxGeometry(1, 1, 1, DOME_ROUND_SEGMENTS, DOME_ROUND_RADIUS),
-      new MeshPhysicalMaterial({
-        metalness: 0,
-        roughness: GLASS_ROUGHNESS, // мороз: размывает прошедший свет
-        transmission: 1, // преломляет/пропускает фон (настоящее стекло)
-        thickness: 6, // «толщина» стекла — глубина преломления/затухания
-        ior: 1.45,
-        transparent: true,
-        // Купола — НЕпересекающиеся в XZ сплошные объёмы (treemap-плитки). Three.js
-        // не сортирует инстансы внутри одного InstancedMesh, поэтому при depthWrite:false
-        // их перекрытие зависело от фиксированного порядка буфера → дальние купола
-        // красились поверх ближних при повороте камеры. depthWrite:true решает
-        // купол-vs-купол пофрагментно (depth-тест) при любом угле. Просвечивание
-        // содержимого сохраняется: домики внутри непрозрачны, попадают в opaque-проход
-        // и transmission-буфер ДО купола (см. §II.3.7).
-        depthWrite: true,
-      }),
+      makeDomeGeometry(),
+      makeDomeMaterial(false),
       districts.length,
     );
     domeMesh.renderOrder = 2; // после непрозрачных (здания/плиты)
@@ -1040,16 +1196,9 @@ export function buildLevel(
     domeMesh.setMatrixAt(j, ZERO_MATRIX);
     domeMesh.instanceMatrix.needsUpdate = true;
 
-    // Клон материала купола: тот же «мороз», но фейдим opacity и не пишем глубину
-    // (полупрозрачный, уезжает над активной застройкой). Цвет стекла был per-instance.
-    const mat = (domeMesh.material as MeshPhysicalMaterial).clone();
-    mat.transparent = true;
-    mat.depthWrite = false;
-    mat.color.set(GLASS_COLOR);
-    const mesh = new Mesh(
-      new RoundedBoxGeometry(1, 1, 1, DOME_ROUND_SEGMENTS, DOME_ROUND_RADIUS),
-      mat,
-    );
+    // Отдельный полупрозрачный купол (материал/геометрия — общие, см. makeDome*).
+    const mat = makeDomeMaterial(true);
+    const mesh = new Mesh(makeDomeGeometry(), mat);
     // domeReal[j] — чистое подобие (scale+translate, без вращений): берём прямо из
     // элементов матрицы, не раскладывая её.
     mesh.scale.set(e[0], sy, e[10]);
@@ -1061,12 +1210,7 @@ export function buildLevel(
 
     return {
       setProgress(prog) {
-        const t = prog < 0 ? 0 : prog > 1 ? 1 : prog;
-        mesh.position.y = baseY + liftBy * (1 - (1 - t) ** 3); // easeOutCubic-подъём
-        const fade = smoothstep01(
-          (t - DOME_FADE_START) / (1 - DOME_FADE_START),
-        );
-        mat.opacity = 1 - fade; // растворение на хвосте отрезка (smoothstep)
+        applyDomeProgress(mesh, mat, baseY, liftBy, prog);
       },
       dispose() {
         group.remove(mesh);
@@ -1074,6 +1218,29 @@ export function buildLevel(
         mat.dispose();
       },
     };
+  }
+
+  /** Снимки геометрии куполов +1 уровня (см. Level.childDomeDescriptors). */
+  function childDomeDescriptors(): DomeDescriptor[] {
+    const out: DomeDescriptor[] = [];
+    if (!domeMesh) return out;
+    districts.forEach((d, j) => {
+      if (d.d3depth !== 1) return;
+      const e = domeReal[j].elements;
+      if (e[5] === 0) return; // район без купола (не +1)
+      out.push({ sx: e[0], sy: e[5], sz: e[10], x: e[12], y: e[13], z: e[14] });
+    });
+    return out;
+  }
+
+  /** Показать/скрыть реальные купола +1 (см. Level.setChildDomesShown). */
+  function setChildDomesShown(shown: boolean): void {
+    if (!domeMesh) return;
+    districts.forEach((d, j) => {
+      if (d.d3depth !== 1 || domeReal[j].elements[5] === 0) return;
+      domeMesh!.setMatrixAt(j, shown ? domeReal[j] : ZERO_MATRIX);
+    });
+    domeMesh.instanceMatrix.needsUpdate = true;
   }
 
   /** Затемнение периметра «на входе» (drill), кроме раскрываемого поддерева — см.
@@ -1116,6 +1283,8 @@ export function buildLevel(
     span,
     view,
     extractDome,
+    childDomeDescriptors,
+    setChildDomesShown,
     setEnterDim,
     childPlacement(p) {
       return placements.get(p) ?? null;
