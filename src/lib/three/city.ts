@@ -819,10 +819,15 @@ export function buildLevel(
   const ground = makeFadedGround(span);
   group.add(ground);
   const roadDots = buildRoadDots(span, districts, buildings);
-  // ВРЕМЕННО: отрисовка точек-дорог отключена (отладка плотности/шва). Меш
-  // по-прежнему строится и переключается visible в декоре/активном, просто не
-  // добавлен в группу. Вернуть — раскомментировать строку ниже.
+  // ВРЕМЕННО: точки-«бордюры» вокруг блоков (дороги) отключены (отладка плотности/
+  // шва). Меш строится и переключается visible, но в группу не добавлен. Вернуть —
+  // раскомментировать строку ниже.
   // group.add(roadDots);
+  // Dot-grid земли (vision §II.4) — регулярная мировая сетка точек по всему апрону,
+  // включая площадь под городом (в зазорах между зданиями читается как «текстура
+  // земли»). Без бордюров-дорог. Видимость зеркалит землю (см. setGroundShown).
+  const groundDots = buildGroundDots(span);
+  group.add(groundDots);
 
   const dummy = new Object3D();
   const color = new Color();
@@ -1114,6 +1119,7 @@ export function buildLevel(
   function applyDecor(): void {
     ground.visible = false;
     roadDots.visible = false;
+    groundDots.visible = false;
 
     for (const g of buildGroups) {
       g.items.forEach((it, i) => {
@@ -1162,6 +1168,7 @@ export function buildLevel(
   function applyActive(): void {
     ground.visible = true;
     roadDots.visible = true;
+    groundDots.visible = true;
 
     for (const g of buildGroups) {
       g.items.forEach((_, i) => g.mesh.setMatrixAt(i, g.real[i]));
@@ -1312,6 +1319,7 @@ export function buildLevel(
     setGroundShown(visible) {
       ground.visible = visible;
       roadDots.visible = visible;
+      groundDots.visible = visible;
     },
     setActive() {
       if (!isDecor) return;
@@ -1509,8 +1517,39 @@ function buildRoadDots(
     }
   }
 
-  // Собираем InstancedMesh. Точка — плоский кружок (CircleGeometry в XY),
-  // кладём в XZ поворотом и масштабируем под «яркость»/угол на матрице инстанса.
+  return makeDotMesh(dots, span);
+}
+
+/**
+ * Dot-grid земли (vision §II.4): регулярная мировая сетка точек по ВСЕМУ апрону,
+ * включая площадь под городом (в зазорах между зданиями читается как «текстура
+ * земли», под домами скрыта их непрозрачностью). Яркость точки — bright в центре,
+ * радиально гаснет к краям (та же кривая `groundFade`, что и у самой земли), поэтому
+ * сетка тает в фон вместе с апроном. Без бордюров-дорог (их несёт `buildRoadDots`).
+ */
+function buildGroundDots(span: LevelSpan): InstancedMesh {
+  const dots: DotSpec[] = [];
+  const half = (Math.max(span.w, span.d) * GROUND_APRON) / 2;
+  for (let x = -half; x <= half; x += APRON_STEP) {
+    for (let z = -half; z <= half; z += APRON_STEP) {
+      // groundFade: 0 в центре → 1 к краю; яркость точки — обратная (ярче в центре).
+      const fade = 1 - groundFade(x, z, half);
+      if (fade <= 0.02) continue; // у самого края точки невидимы — не создаём
+      dots.push({ x, z, scale: 1, alpha: APRON_DOT_ALPHA * fade });
+    }
+  }
+  return makeDotMesh(dots, span);
+}
+
+/**
+ * Собрать слой точек в один `InstancedMesh` (общий код дорог и dot-grid земли).
+ * Точка — плоский кружок (`CircleGeometry` в XY), кладём в XZ поворотом и масштабируем
+ * под «яркость»/угол на матрице инстанса. Цвет = локальный цвет земли (с тем же
+ * радиальным угасанием) → подмешан к белому на «яркость» точки, так далёкие точки
+ * тают вместе с землёй.
+ */
+function makeDotMesh(dots: DotSpec[], span: LevelSpan): InstancedMesh {
+  const half = (Math.max(span.w, span.d) * GROUND_APRON) / 2;
   const mesh = new InstancedMesh(
     new CircleGeometry(DOT_R, 10),
     new MeshBasicMaterial(),
@@ -1528,7 +1567,6 @@ function buildRoadDots(
     dummy.scale.setScalar(d.scale);
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
-    // Цвет = локальный цвет земли (с тем же радиальным угасанием) → белый на alpha.
     col
       .copy(base)
       .lerp(edge, groundFade(d.x, d.z, half))
