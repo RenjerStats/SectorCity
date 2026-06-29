@@ -124,6 +124,20 @@ export const aggSettings = atom<AggSettings>({
  */
 export const searchQuery = atom<string>("");
 
+/**
+ * Результаты ГЛОБАЛЬНОГО поиска по снимку (vision §I.3): крупнейшие совпадения по
+ * имени со всего дерева (не только текущий уровень). Питают список в footer; клик
+ * по результату — навигация к зданию (drill-цепочка). Заполняет владелец сцены
+ * (Scene) дебаунс-запросом к IPC `search`; пусто, когда запрос короче минимума.
+ */
+export const searchResults = atom<ScanNode[]>([]);
+
+/** Идёт ли сейчас запрос глобального поиска (для индикации «ищу…» в footer). */
+export const searchPending = atom<boolean>(false);
+
+/** Минимальная длина запроса для глобального поиска (vision §I.3: «от ~2 символов»). */
+export const SEARCH_MIN_CHARS = 2;
+
 /** Один шаг навигации (хлебная крошка): путь уровня и его имя. */
 export interface Crumb {
   path: string;

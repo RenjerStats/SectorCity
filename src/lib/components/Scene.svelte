@@ -8,6 +8,7 @@
   import StatusOverlay from "./StatusOverlay.svelte";
   import CategoryEmpty from "./CategoryEmpty.svelte";
   import NodeCard from "./NodeCard.svelte";
+  import ContextMenu from "./ContextMenu.svelte";
   import {
     setupInteraction,
     type InteractionController,
@@ -17,8 +18,9 @@
     startScan,
     cancelScan,
     currentRoot,
+    search,
   } from "../ipc/commands";
-  import { revealInExplorer } from "../ipc/actions";
+  import { revealInExplorer, copyPath } from "../ipc/actions";
   import { baseName } from "../format";
   import {
     appMode,
@@ -28,6 +30,9 @@
     breadcrumbs,
     candidateFilter,
     searchQuery,
+    searchResults,
+    searchPending,
+    SEARCH_MIN_CHARS,
     aggSettings,
     markedForCleanup,
     toggleMark,
@@ -57,6 +62,9 @@
     ScanProgress,
   } from "../ipc/contract";
 
+  /** Дебаунс глобального поиска (мс): не дёргаем бэк на каждый символ. */
+  const SEARCH_DEBOUNCE_MS = 200;
+
   // Этот компонент — ЕДИНСТВЕННЫЙ владелец 3D-сцены. Он монтирует canvas,
   // держит жизненный цикл сцены и наполняет её данными из IPC. Связь с
   // остальным DOM — через стор; высокочастотную позицию окна над зданием пишем
@@ -70,6 +78,14 @@
   // Позицию ставим императивно покадрово; контент — реактивно из сторов.
   let cardEl = $state<HTMLDivElement | undefined>(undefined);
   let hoverEl = $state<HTMLDivElement | undefined>(undefined);
+  // Контекстное меню ПКМ (vision §I.10): узел под курсором + позиция, либо null.
+  // Низкочастотно (по клику) — обычный $state, как selectedNode; рендерится в DOM.
+  let contextMenu = $state<{
+    node: ScanNode;
+    drillTarget: ScanNode;
+    x: number;
+    y: number;
+  } | null>(null);
 
   // Состояние центрального оверлея (приветствие/пусто/ошибка/отмена). Низко-
   // частотное — обычный $state; "none" = город виден, оверлей не рисуется.
@@ -347,6 +363,13 @@
         if (node.flags.includes("locked")) return;
         toggleMark(node.path, node.size);
       },
+      // ПКМ → контекстное меню (vision §I.10). Клик мимо зданий (info=null) —
+      // меню не показываем (закрываем текущее).
+      onContext: (info, x, y) => {
+        contextMenu = info
+          ? { node: info.node, drillTarget: info.drillTarget, x, y }
+          : null;
+      },
     });
 
     // LOD активного уровня: покадрово по позиции камеры (дёшево, переключение
@@ -395,6 +418,34 @@
       }
     });
     const offSearch = searchQuery.subscribe(() => refreshHighlight());
+
+    // Глобальный поиск (vision §I.3): дебаунс-запрос к снимку → список в footer.
+    // Отдельно от подсветки `refreshHighlight` (та гасит несовпадения на активном
+    // уровне; это — выдача по ВСЕМУ дереву). Гонку гасим сверкой актуальности needle.
+    let searchTimer: ReturnType<typeof setTimeout> | undefined;
+    const offSearchIpc = searchQuery.subscribe((q) => {
+      const needle = q.trim();
+      if (searchTimer) clearTimeout(searchTimer);
+      if (needle.length < SEARCH_MIN_CHARS) {
+        searchResults.set([]);
+        searchPending.set(false);
+        return;
+      }
+      searchPending.set(true);
+      searchTimer = setTimeout(() => {
+        void search(needle)
+          .then((res) => {
+            if (searchQuery.get().trim() === needle) searchResults.set(res);
+          })
+          .catch((err) => {
+            console.warn("поиск не удался:", err);
+            if (searchQuery.get().trim() === needle) searchResults.set([]);
+          })
+          .finally(() => {
+            if (searchQuery.get().trim() === needle) searchPending.set(false);
+          });
+      }, SEARCH_DEBOUNCE_MS);
+    });
 
     // Структурные фильтры (категории, скрытие мелочи) → пересобираем город и
     // обновляем статус пустоты. Первый синхронный вызов subscribe пропускаем
@@ -476,6 +527,9 @@
         case "toggleHidden":
           toggleHidden();
           break;
+        case "navigateTo":
+          void navigateToResult(c.path);
+          break;
       }
     });
 
@@ -524,6 +578,8 @@
       offCard();
       offFilter();
       offSearch();
+      offSearchIpc();
+      if (searchTimer) clearTimeout(searchTimer);
       offCategoryFilter();
       offShowAgg();
       offHidden();
@@ -721,6 +777,73 @@
     interaction?.clearSelection();
   }
 
+  /** «Копировать путь» (карточка / ПКМ). Ошибку (нет доступа к буферу) — в лог. */
+  async function copyPathAction(path: string) {
+    try {
+      await copyPath(path);
+    } catch (err) {
+      console.warn("копирование пути не удалось:", err);
+    }
+  }
+
+  /** Цепочка крошек от корня `root` до `leaf` (включительно) по ПРЕФИКСАМ реального
+   *  пути: каждый предок — префикс `leaf`, обрезанный по разделителю, поэтому строки
+   *  точно совпадают с путями снимка (важно для последующих прыжков по крошкам;
+   *  устойчиво к разделителю `\`/`/` и корню-диску `C:\`). */
+  function chainTo(
+    root: string,
+    leaf: string,
+  ): { path: string; name: string }[] {
+    const chain = [{ path: root, name: crumbName(root) }];
+    if (leaf === root || !leaf.startsWith(root)) return chain;
+    const isSep = (c: string) => c === "\\" || c === "/";
+    let pos = root.length;
+    while (pos < leaf.length) {
+      while (pos < leaf.length && isSep(leaf[pos])) pos++;
+      let next = pos;
+      while (next < leaf.length && !isSep(leaf[next])) next++;
+      if (next === pos) break;
+      chain.push({ path: leaf.slice(0, next), name: leaf.slice(pos, next) });
+      pos = next;
+    }
+    return chain;
+  }
+
+  /** Навигация к узлу по пути (vision §I.3: клик по результату поиска → «дойти»).
+   *  Перестраиваем мир на уровне-РОДИТЕЛЕ узла (здание видно среди соседей) и
+   *  восстанавливаем крошки от корня; поиск остаётся активным, поэтому совпадение
+   *  светится среди притушенных. Жёсткая пересборка (origin сбрасывается, как прыжок
+   *  по неблизкой крошке) — простая и надёжная, без бесшовного зума через всё дерево. */
+  async function navigateToResult(target: string) {
+    if ($appMode.kind === "zooming" || !nav) return;
+    const crumbsNow = $breadcrumbs;
+    const root = crumbsNow.length > 0 ? crumbsNow[0].path : "";
+    if (!root) return;
+    const full = chainTo(root, target);
+    // Уровень-владелец = родитель target (крошки без последнего звена).
+    const levelChain = full.slice(0, Math.max(1, full.length - 1));
+    const parentPath = levelChain[levelChain.length - 1].path;
+
+    const wasCleanup = $appMode.kind === "cleanup";
+    interaction?.clearSelection();
+    hoveredNode.set(null);
+    appMode.set({ kind: "zooming", from: "", to: parentPath });
+
+    const nodes = await getLevel(parentPath, aggSpec(), PREVIEW_DEPTH);
+    currentUnfilteredNodes = nodes;
+    nav.reset(getFilteredNodes(nodes), parentPath);
+    interaction?.clearHover();
+    setSummary(nodes, parentPath);
+    updateFilterEmpty(nodes);
+    breadcrumbs.set(levelChain);
+    appMode.set(
+      wasCleanup
+        ? { kind: "cleanup", path: parentPath }
+        : { kind: "idle", path: parentPath },
+    );
+    statusKind = "none";
+  }
+
   // Два НЕЗАВИСИМЫХ окна: полное на выбранном и мини на наведённом. Никакого
   // общего состояния — иначе hover дёргает разворот выбранного (см. NodeCard).
   let hovered = $derived($hoveredNode);
@@ -757,6 +880,7 @@
           onReveal={revealNode}
           onClose={closeCard}
           onHide={hideSelected}
+          onCopyPath={copyPathAction}
         />
       {/key}
     </div>
@@ -775,6 +899,29 @@
         onClose={closeCard}
       />
     </div>
+  {/if}
+
+  <!-- Контекстное меню ПКМ (vision §I.10): рендерится Scene (владелец 3D), данные
+       и действия — локально, как у карточки. fixed-позиция (координаты курсора). -->
+  {#if contextMenu}
+    <ContextMenu
+      menu={contextMenu}
+      cleanup={$appMode.kind === "cleanup"}
+      marked={$markedForCleanup.has(contextMenu.node.path)}
+      onOpen={(node) => {
+        contextMenu = null;
+        void drill(node);
+      }}
+      onReveal={revealNode}
+      onCopyPath={copyPathAction}
+      onHide={hideSelected}
+      onProperties={() => interaction?.selectContext()}
+      onMark={(node) => {
+        if (node.flags.includes("locked")) return;
+        toggleMark(node.path, node.size);
+      }}
+      onClose={() => (contextMenu = null)}
+    />
   {/if}
 </div>
 

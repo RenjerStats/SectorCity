@@ -162,11 +162,36 @@ pub async fn get_node_detail(
         .and_then(|tree| tree.index_of(&path).map(|i| tree.to_contract(i))))
 }
 
-/// Поиск по текущему снимку ФС.
+/// Максимум результатов поиска (страховка от перегрузки списка и сериализации).
+const SEARCH_LIMIT: usize = 200;
+
+/// Глобальный поиск по имени в текущем снимке ФС (vision §I.3): регистронезависимое
+/// вхождение подстроки в имя узла. Результаты — крупнейшие первыми (ответ «что самое
+/// тяжёлое из совпавшего»), не более [`SEARCH_LIMIT`]. Корень из выдачи исключаем
+/// (он не «здание» в выдаче, к нему незачем «доходить»).
 #[tauri::command]
-pub async fn search(query: String) -> AppResult<Vec<ScanNode>> {
-    tracing::info!(%query, "search (заглушка)");
-    Ok(Vec::new())
+pub async fn search(query: String, state: State<'_, AppState>) -> AppResult<Vec<ScanNode>> {
+    tracing::info!(%query, "search");
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    let guard = state.scan.lock().unwrap();
+    let Some(tree) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let mut hits: Vec<usize> = tree
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, n)| *i != tree.root && n.name.to_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect();
+    // Крупнейшие первыми; при равенстве — стабильно по индексу (детерминизм выдачи).
+    hits.sort_by(|&a, &b| tree.nodes[b].size.cmp(&tree.nodes[a].size).then(a.cmp(&b)));
+    hits.truncate(SEARCH_LIMIT);
+    Ok(hits.into_iter().map(|i| tree.to_contract(i)).collect())
 }
 
 /// Переместить список файлов/папок в Корзину.

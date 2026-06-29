@@ -25,6 +25,7 @@ import {
   Vector3,
 } from "three";
 import type { ScanNode } from "../ipc/contract";
+import type { PickInfo } from "./city";
 import type { SceneHandle } from "./scene";
 import { activeView, isInteractive } from "./navigator";
 
@@ -42,6 +43,12 @@ export interface InteractionCallbacks {
   isCleanup(): boolean;
   /** Режим cleanup: клик по зданию-файлу — пометить/снять на снос (vision §I.7). */
   onMark(node: ScanNode): void;
+  /**
+   * ПКМ по узлу (vision §I.10): открыть контекстное меню. `info` — узел под
+   * курсором и его цель-drill (район), либо `null` (клик мимо зданий → меню не
+   * нужно). `x`/`y` — экранные координаты курсора для позиционирования меню.
+   */
+  onContext(info: PickInfo | null, x: number, y: number): void;
 }
 
 /** Управление слоем взаимодействия. */
@@ -54,6 +61,12 @@ export interface InteractionController {
   clearHover(): void;
   /** Снять выбор (напр. при drill/смене уровня). Шлёт `onSelect(null)`. */
   clearSelection(): void;
+  /**
+   * Выбрать узел, на котором было открыто контекстное меню (пункт «Свойства» →
+   * карточка). Использует Hit, пойманный при ПКМ, поэтому карточка корректно
+   * заякоривается над зданием. No-op, если ПКМ не по зданию.
+   */
+  selectContext(): void;
   /** Снять слушатели и освободить ресурсы highlight-mesh. */
   dispose(): void;
 }
@@ -78,6 +91,8 @@ export function setupInteraction(
   let hovered: Hit | null = null;
   let selected: Hit | null = null;
   let down: { x: number; y: number } | null = null;
+  // Hit + узел, пойманные при ПКМ (для пункта меню «Свойства» → карточка).
+  let lastContext: { hit: Hit; node: ScanNode } | null = null;
 
   // Один highlight-mesh: рёбра единичного бокса, трансформ = матрица инстанса.
   const highlight = new LineSegments(
@@ -166,14 +181,36 @@ export function setupInteraction(
     dirty = true;
   }
   function onDown(e: PointerEvent): void {
+    if (e.button !== 0) return; // ЛКМ — клик/drill; ПКМ идёт через contextmenu
     down = { x: e.clientX, y: e.clientY };
   }
   function onUp(e: PointerEvent): void {
-    if (!down) return;
+    if (e.button !== 0 || !down) return;
     const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
     down = null;
     if (moved > CLICK_SLOP) return; // это был пан камеры, не клик
     pick();
+  }
+
+  /** ПКМ: разрешить узел под курсором (точно по координатам события) и открыть
+   *  контекстное меню (vision §I.10). Не трогает выбор/наведение — это отдельный
+   *  канал. Браузерное меню подавляем (`preventDefault`). */
+  function onContextMenu(e: MouseEvent): void {
+    e.preventDefault();
+    lastContext = null;
+    const view = activeView(handle.content);
+    if (!view || !isInteractive(handle.content)) {
+      cb.onContext(null, e.clientX, e.clientY);
+      return;
+    }
+    const rect = handle.canvas.getBoundingClientRect();
+    pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    const hit = raycastHit();
+    dirty = true; // вернуть наведение к фактической позиции на следующем кадре
+    const info = hit ? view.resolvePick(hit.mesh, hit.id) : null;
+    if (hit && info) lastContext = { hit, node: info.node };
+    cb.onContext(info, e.clientX, e.clientY);
   }
 
   function pick(): void {
@@ -220,6 +257,7 @@ export function setupInteraction(
   canvas.addEventListener("pointerleave", onLeave);
   canvas.addEventListener("pointerdown", onDown);
   canvas.addEventListener("pointerup", onUp);
+  canvas.addEventListener("contextmenu", onContextMenu);
 
   return {
     hoverAnchor() {
@@ -242,12 +280,16 @@ export function setupInteraction(
     clearSelection() {
       setSelected(null);
     },
+    selectContext() {
+      if (lastContext) setSelected(lastContext.hit, lastContext.node);
+    },
     dispose() {
       offFrame();
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerleave", onLeave);
       canvas.removeEventListener("pointerdown", onDown);
       canvas.removeEventListener("pointerup", onUp);
+      canvas.removeEventListener("contextmenu", onContextMenu);
       highlight.geometry.dispose();
       (highlight.material as LineBasicMaterial).dispose();
     },

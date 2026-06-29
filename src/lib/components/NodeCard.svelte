@@ -29,8 +29,11 @@
     onClose: () => void;
     /** Скрыть узел из визуализации. */
     onHide?: (path: string) => void;
+    /** Копировать путь узла в буфер (vision §I.9). */
+    onCopyPath?: (path: string) => void;
   }
-  let { node, expanded, onReveal, onClose, onHide }: Props = $props();
+  let { node, expanded, onReveal, onClose, onHide, onCopyPath }: Props =
+    $props();
 
   // Синтетический блок «Прочее»: не файл и не папка — объединённая мелочь.
   let isAgg = $derived(node.flags.includes("aggregated"));
@@ -243,7 +246,34 @@
         {/if}
 
         <div class="path-container" title={node.path}>
-          <span class="path-label">Путь</span>
+          <div class="path-head">
+            <span class="path-label">Путь</span>
+            {#if onCopyPath && !isAgg}
+              <button
+                class="copy-btn"
+                onclick={() => onCopyPath(node.path)}
+                title="Копировать путь"
+                aria-label="Копировать путь"
+              >
+                <svg
+                  class="btn-icon"
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path
+                    d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                  ></path>
+                </svg>
+                <span>Копировать</span>
+              </button>
+            {/if}
+          </div>
           <div class="path-text">{node.path}</div>
         </div>
 
@@ -529,12 +559,42 @@
     max-height: 4.2rem;
     overflow: hidden;
   }
+  .path-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+  }
   .path-label {
     font-size: 0.62rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
+  }
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.15rem 0.4rem;
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--text-2);
+    font: inherit;
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+  }
+  .copy-btn:hover {
+    border-color: var(--border);
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+  .copy-btn .btn-icon {
+    width: 0.8rem;
+    height: 0.8rem;
   }
   .path-text {
     word-break: break-all;

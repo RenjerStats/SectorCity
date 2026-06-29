@@ -19,3 +19,27 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 export function revealInExplorer(path: string): Promise<void> {
   return revealItemInDir(path);
 }
+
+/**
+ * Скопировать путь узла в системный буфер обмена (vision §I.9/§I.10).
+ * Использует Clipboard API webview (доступен в защищённом контексте Tauri) — без
+ * отдельного плагина; на случай его отсутствия — фолбэк через скрытый `textarea`.
+ * Бросает только при провале обоих способов — владелец заворачивает ошибку в UI.
+ */
+export async function copyPath(path: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(path);
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = path;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.body.removeChild(ta);
+  }
+}

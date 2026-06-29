@@ -12,7 +12,7 @@
    * Здесь не только текст: это полноценные виджеты. Новый режим подключается
    * добавлением ветки сюда ИЛИ временным захватом слота из своего компонента.
    */
-  import { appMode, scanProgress } from "../store/mode";
+  import { appMode, scanProgress, searchQuery } from "../store/mode";
   import {
     footerSlot,
     levelSummary,
@@ -21,6 +21,7 @@
   } from "../store/ui";
   import DiskMapProgress from "./footer/DiskMapProgress.svelte";
   import DiskFillBar from "./footer/DiskFillBar.svelte";
+  import SearchResults from "./footer/SearchResults.svelte";
   import Legend from "./Legend.svelte";
   import FilterPanel from "./FilterPanel.svelte";
   import CleanupPanel from "./CleanupPanel.svelte";
@@ -30,6 +31,9 @@
   let mode = $derived($appMode);
   let filters = $derived($filtersOpen);
   let hidden = $derived($hiddenOpen);
+  // Активный поиск занимает footer списком результатов (vision §I.3) — приоритет
+  // выше фильтров/легенды, но ниже скана.
+  let searching = $derived($searchQuery.trim().length > 0);
 </script>
 
 <footer class="footer">
@@ -37,6 +41,8 @@
     {@render override()}
   {:else if mode.kind === "scanning"}
     <DiskMapProgress progress={$scanProgress} />
+  {:else if searching}
+    <SearchResults />
   {:else if mode.kind === "cleanup"}
     <CleanupPanel />
   {:else if hidden}
