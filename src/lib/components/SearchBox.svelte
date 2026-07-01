@@ -5,9 +5,11 @@
    * поиск с фильтром и зовёт `navigator.applyHighlight`). Презентационный.
    */
   import { searchQuery } from "../store/mode";
+  import { searchFocusRequest } from "../store/ui";
 
   let q = $derived($searchQuery);
   let isFocused = $state(false);
+  let inputEl = $state<HTMLInputElement | undefined>(undefined);
 
   function onInput(e: Event) {
     searchQuery.set((e.currentTarget as HTMLInputElement).value);
@@ -15,6 +17,16 @@
   function clear() {
     searchQuery.set("");
   }
+
+  // Фокус по запросу с клавиатуры («/» или Ctrl+F, hotkeys.ts). Нонс растёт —
+  // фокусируем и выделяем текст. Стартовое значение 0 при первом прогоне effect
+  // фокус не даёт (условие `> 0`), поэтому поле не крадёт фокус при монтировании.
+  $effect(() => {
+    if ($searchFocusRequest > 0 && inputEl) {
+      inputEl.focus();
+      inputEl.select();
+    }
+  });
 </script>
 
 <div
@@ -38,6 +50,7 @@
   </svg>
 
   <input
+    bind:this={inputEl}
     type="text"
     placeholder="Поиск по имени…"
     value={q}

@@ -49,7 +49,6 @@
         ></div>
       {/each}
     </div>
-    <span class="path" title={summary.path}>{summary.path || "—"}</span>
   {:else}
     <span class="empty">Нет данных уровня</span>
   {/if}
@@ -83,17 +82,6 @@
   }
   .seg + .seg {
     border-left: 1px solid var(--bg);
-  }
-  .path {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 28vw;
-    direction: rtl; /* при обрезке прячем НАЧАЛО пути, хвост виден */
-    text-align: left;
   }
   .empty {
     color: var(--text-muted);

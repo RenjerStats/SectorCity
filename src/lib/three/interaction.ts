@@ -13,8 +13,8 @@
  * Прямой связи raycaster ↔ DOM нет.
  */
 import {
-  BoxGeometry,
-  EdgesGeometry,
+  BufferGeometry,
+  Float32BufferAttribute,
   type InstancedMesh,
   LineBasicMaterial,
   LineSegments,
@@ -28,6 +28,8 @@ import type { ScanNode } from "../ipc/contract";
 import type { PickInfo } from "./city";
 import type { SceneHandle } from "./scene";
 import { activeView, isInteractive } from "./navigator";
+import { THEMES_3D } from "./theme";
+import { theme } from "../store/settings";
 
 /** Колбэки наружу: владелец заворачивает их в стор / машину режимов. */
 export interface InteractionCallbacks {
@@ -67,12 +69,46 @@ export interface InteractionController {
    * заякоривается над зданием. No-op, если ПКМ не по зданию.
    */
   selectContext(): void;
+  /**
+   * Выбрать НАВЕДЁННЫЙ узел (хоткей «Свойства» = Space). Использует текущий hover-
+   * Hit, поэтому карточка заякоривается над зданием. No-op, если ничего не наведено.
+   */
+  selectHovered(): void;
   /** Снять слушатели и освободить ресурсы highlight-mesh. */
   dispose(): void;
 }
 
 /** Порог в пикселях: смещение больше — это перетаскивание камеры, не клик. */
 const CLICK_SLOP = 5;
+
+/**
+ * Геометрия обводки — «уголки-визир» (corner brackets): из каждого угла единичного
+ * бокса ([-0.5…0.5]³) три коротких луча вдоль сходящихся рёбер. Читается как
+ * технический прицел/скобки (эстетика Nothing/dot-matrix), а не сплошная рамка.
+ * Масштабируется матрицей инстанса, поэтому длина уголков пропорциональна сторонам
+ * здания (уголки «обнимают» углы, центр рёбер открыт).
+ */
+function makeReticleGeometry(): BufferGeometry {
+  const s = 0.5;
+  const arm = 0.22; // доля половины стороны, которую занимает один луч уголка
+  const signs = [-1, 1];
+  const p: number[] = [];
+  for (const sx of signs) {
+    for (const sy of signs) {
+      for (const sz of signs) {
+        const cx = sx * s;
+        const cy = sy * s;
+        const cz = sz * s;
+        p.push(cx, cy, cz, cx - sx * arm, cy, cz); // луч вдоль X
+        p.push(cx, cy, cz, cx, cy - sy * arm, cz); // луч вдоль Y
+        p.push(cx, cy, cz, cx, cy, cz - sz * arm); // луч вдоль Z
+      }
+    }
+  }
+  const g = new BufferGeometry();
+  g.setAttribute("position", new Float32BufferAttribute(p, 3));
+  return g;
+}
 
 /** Попадание raycast: меш уровня + индекс инстанса в нём. */
 interface Hit {
@@ -91,17 +127,27 @@ export function setupInteraction(
   let hovered: Hit | null = null;
   let selected: Hit | null = null;
   let down: { x: number; y: number } | null = null;
+  // Старт нажатия ПКМ — чтобы отличить вращение сцены (MapControls RIGHT=ROTATE) от
+  // клика: если к моменту contextmenu курсор ушёл дальше порога, меню не открываем.
+  let rightDown: { x: number; y: number } | null = null;
   // Hit + узел, пойманные при ПКМ (для пункта меню «Свойства» → карточка).
   let lastContext: { hit: Hit; node: ScanNode } | null = null;
 
-  // Один highlight-mesh: рёбра единичного бокса, трансформ = матрица инстанса.
-  const highlight = new LineSegments(
-    new EdgesGeometry(new BoxGeometry(1, 1, 1)),
-    new LineBasicMaterial({ color: 0xffffff }),
-  );
+  // Один highlight-mesh: «уголки-визир» вокруг наведённого инстанса (трансформ =
+  // его матрица). Форма-прицел + акцентный цвет темы вместо белой рамки — «под стиль».
+  const highlightMat = new LineBasicMaterial({
+    color: THEMES_3D[theme.get()].accent,
+  });
+  const highlight = new LineSegments(makeReticleGeometry(), highlightMat);
   highlight.visible = false;
   highlight.matrixAutoUpdate = false;
   handle.add(highlight);
+
+  // Обводка следует за темой (стор-мост, docs §1): при смене темы перекрашиваем
+  // акцент визира. subscribe шлёт текущее значение сразу — цвет всегда актуален.
+  const unsubTheme = theme.subscribe((name) => {
+    highlightMat.color.setHex(THEMES_3D[name].accent);
+  });
 
   const m = new Matrix4();
   const pos = new Vector3();
@@ -118,11 +164,15 @@ export function setupInteraction(
     raycaster.setFromCamera(pointer, handle.camera);
     const hits = raycaster.intersectObjects(meshes, false);
     for (const h of hits) {
-      // Скрытые LOD-инстансы (scale=0) вырождены и не дают пересечения; первое
-      // попадание уже ближайшее (intersectObjects сортирует по дистанции).
-      if (h.instanceId != null) {
-        return { mesh: h.object as InstancedMesh, id: h.instanceId };
-      }
+      // Скрытые LOD-инстансы (scale=0) вырождены и не дают пересечения; hits
+      // отсортированы по дистанции (intersectObjects) — идём от ближнего к дальнему.
+      if (h.instanceId == null) continue;
+      const mesh = h.object as InstancedMesh;
+      // Вложенные превью-домики под куполом прозрачны для пикинга: пропускаем их,
+      // чтобы курсор упирался в купол/плиту папки, а не в содержимое под стеклом
+      // (надёжное и предсказуемое наведение вместо случайного зацепа при ракурсе).
+      if (!view.isPickTarget(mesh, h.instanceId)) continue;
+      return { mesh, id: h.instanceId };
     }
     return null;
   }
@@ -181,8 +231,13 @@ export function setupInteraction(
     dirty = true;
   }
   function onDown(e: PointerEvent): void {
-    if (e.button !== 0) return; // ЛКМ — клик/drill; ПКМ идёт через contextmenu
-    down = { x: e.clientX, y: e.clientY };
+    if (e.button === 2) {
+      // Запоминаем старт ПКМ для различения «поворот камеры» vs «клик» (см. rightDown).
+      rightDown = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    if (e.button !== 0) return; // прочие кнопки нам не интересны
+    down = { x: e.clientX, y: e.clientY }; // ЛКМ — клик/drill
   }
   function onUp(e: PointerEvent): void {
     if (e.button !== 0 || !down) return;
@@ -197,6 +252,15 @@ export function setupInteraction(
    *  канал. Браузерное меню подавляем (`preventDefault`). */
   function onContextMenu(e: MouseEvent): void {
     e.preventDefault();
+    // Вращение сцены ПКМ-драгом не должно оканчиваться кликом/меню: если между
+    // нажатием ПКМ и его отпусканием курсор сместился дальше порога — это был поворот
+    // камеры, а не клик по объекту. Меню в этом случае не открываем.
+    const rd = rightDown;
+    rightDown = null;
+    if (rd && Math.hypot(e.clientX - rd.x, e.clientY - rd.y) > CLICK_SLOP) {
+      dirty = true; // вернуть наведение к фактической позиции после поворота
+      return;
+    }
     lastContext = null;
     const view = activeView(handle.content);
     if (!view || !isInteractive(handle.content)) {
@@ -283,8 +347,15 @@ export function setupInteraction(
     selectContext() {
       if (lastContext) setSelected(lastContext.hit, lastContext.node);
     },
+    selectHovered() {
+      if (!hovered) return;
+      const view = activeView(handle.content);
+      const info = view?.resolvePick(hovered.mesh, hovered.id);
+      if (info) setSelected(hovered, info.node);
+    },
     dispose() {
       offFrame();
+      unsubTheme();
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerleave", onLeave);
       canvas.removeEventListener("pointerdown", onDown);

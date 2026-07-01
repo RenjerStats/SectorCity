@@ -225,6 +225,15 @@ export interface CityView {
   pickMeshes(): InstancedMesh[];
   /** Разрешить попадание (меш+инстанс) в узел/цель-drill, либо `null`. */
   resolvePick(mesh: Object3D, instanceId: number): PickInfo | null;
+  /**
+   * Является ли инстанс САМОСТОЯТЕЛЬНОЙ целью пикинга. Вложенное превью-содержимое
+   * (+1 домики под куполом папки) — декоративное: с ним не взаимодействуют
+   * поштучно, курсор должен упираться в купол папки, а не в домики под стеклом.
+   * Такие инстансы «прозрачны» для raycast — луч проходит сквозь них к куполу/плите
+   * (клик по ним и так вёл drill в родительскую папку). Купола/плиты/файлы верхнего
+   * уровня — обычные цели (`true`).
+   */
+  isPickTarget(mesh: Object3D, instanceId: number): boolean;
 }
 
 /**
@@ -348,8 +357,18 @@ export interface Level {
    * `excludePath` ОСТаётся ярким (его подхватит новый активный уровень — без «прыжка»
    * яркости в центре кадра). Только per-instance цвет (без матриц); на свопе владелец
    * возвращает базовые цвета и ставит итоговый декор-облик. No-op-безопасно вне зума.
+   * `match`/`cleanup` — текущий облик режима: периметр гаснет как МОДО-цвет × factor,
+   * поэтому совпадения поиска / метки очистки не «сбрасываются» во время анимации.
    */
-  setEnterDim(excludePath: string, factor: number): void;
+  setEnterDim(
+    excludePath: string,
+    factor: number,
+    match: ((node: ScanNode) => boolean) | null,
+    cleanup: {
+      isMarked: (node: ScanNode) => boolean;
+      isCandidate: (node: ScanNode) => boolean;
+    } | null,
+  ): void;
   /**
    * Подсветка-фильтр (vision §I.4б): несовпадающие с предикатом узлы гасятся
    * домножением per-instance цвета на `DIM_FACTOR`, совпадающие остаются в полном
@@ -666,6 +685,37 @@ const ZERO_MATRIX = new Matrix4().makeScale(0, 0, 0);
  */
 function ringBaseColor(node: ScanNode): number {
   return node.flags.includes("aggregated") ? AGGREGATE_COLOR : DOME_RING_COLOR;
+}
+
+/**
+ * Итоговый per-instance ЦВЕТ узла по текущему облику режима — ЕДИНЫЙ источник для
+ * `setHighlight`/`setCleanup` и для затемнения-входа `setEnterDim`. Благодаря общему
+ * источнику периметр во время drill-анимации гаснет, СОХРАНЯЯ облик режима (совпадения
+ * поиска / метки очистки), а не «возвращается» в категорийный цвет.
+ *
+ * `base` — базовый множитель меша (здание — `0xffffff`, купол — стекло, плита — цвет
+ * района). `cleanup` важнее подсветки (вид очистки рисуется поверх). Пишет в `out`
+ * (переиспользуемый `Color`) и возвращает его.
+ */
+function modeColorInto(
+  out: Color,
+  base: number,
+  node: ScanNode,
+  match: ((n: ScanNode) => boolean) | null,
+  cleanup: {
+    isMarked: (n: ScanNode) => boolean;
+    isCandidate: (n: ScanNode) => boolean;
+  } | null,
+): Color {
+  if (cleanup) {
+    if (cleanup.isMarked(node)) return out.set(CLEANUP_MARK_COLOR);
+    out.set(base);
+    if (!cleanup.isCandidate(node)) out.multiplyScalar(DIM_FACTOR);
+    return out;
+  }
+  out.set(base);
+  if (match && !match(node)) out.multiplyScalar(DIM_FACTOR);
+  return out;
 }
 
 /** Единичный скруглённый куб купола — общий для инстанс-меша и анимируемых «роёв». */
@@ -1078,6 +1128,16 @@ export function buildLevel(
         return districtPick[instanceId] ?? null;
       return null;
     },
+    isPickTarget(mesh, instanceId) {
+      const bg = buildGroupByMesh.get(mesh as InstancedMesh);
+      if (bg) {
+        // Вложенный превью-домик (`districtIdx !== null`) — не самостоятельная
+        // цель: пропускаем, чтобы луч дошёл до купола/плиты его папки.
+        const it = bg.items[instanceId];
+        return !!it && it.b.districtIdx === null;
+      }
+      return true; // купола/плиты — обычные цели пикинга
+    },
   };
 
   /** Затемнить общий material меша до фактора `f` (per-instance цвета сохраняются):
@@ -1251,30 +1311,56 @@ export function buildLevel(
   }
 
   /** Затемнение периметра «на входе» (drill), кроме раскрываемого поддерева — см.
-   *  Level.setEnterDim. Только per-instance цвет (×factor), без матриц. */
-  function setEnterDim(excludePath: string, factor: number): void {
+   *  Level.setEnterDim. Только per-instance цвет, без матриц. Периметр гаснет как
+   *  МОДО-цвет узла × factor (`modeColorInto` — тот же источник, что и setHighlight/
+   *  setCleanup), поэтому во время зума облик режима СОХРАНЯЕТСЯ (совпадения/метки не
+   *  «сбрасываются» в категорийный цвет). `match`/`cleanup` — текущий облик режима. */
+  function setEnterDim(
+    excludePath: string,
+    factor: number,
+    match: ((n: ScanNode) => boolean) | null,
+    cleanup: {
+      isMarked: (n: ScanNode) => boolean;
+      isCandidate: (n: ScanNode) => boolean;
+    } | null,
+  ): void {
     const exIdx = districtIndexByPath.get(excludePath) ?? null;
     for (const g of buildGroups) {
       g.items.forEach((it, i) => {
         // Раскрываемое поддерево остаётся ярким (его подхватит новый активный).
         if (it.b.topDistrictIdx !== null && it.b.topDistrictIdx === exIdx)
           return;
-        // Цвет здания — множитель состояния: белый×factor затемняет периметр.
-        g.mesh.setColorAt(i, color.setRGB(factor, factor, factor));
+        // Модо-цвет × factor: периметр гаснет, но облик режима сохраняется.
+        modeColorInto(color, 0xffffff, it.b.node, match, cleanup);
+        g.mesh.setColorAt(i, color.multiplyScalar(factor));
       });
       if (g.mesh.instanceColor) g.mesh.instanceColor.needsUpdate = true;
     }
     if (domeMesh && baseMesh && baseMatteMesh) {
       districts.forEach((d, j) => {
         if (j === exIdx || d.topIdx === exIdx) return;
-        domeMesh!.setColorAt(j, color.set(GLASS_COLOR).multiplyScalar(factor));
+        const ring = ringBaseColor(d.node);
+        domeMesh!.setColorAt(
+          j,
+          modeColorInto(
+            color,
+            GLASS_COLOR,
+            d.node,
+            match,
+            cleanup,
+          ).multiplyScalar(factor),
+        );
         baseMesh!.setColorAt(
           j,
-          color.set(ringBaseColor(d.node)).multiplyScalar(factor),
+          modeColorInto(color, ring, d.node, match, cleanup).multiplyScalar(
+            factor,
+          ),
         );
         baseMatteMesh!.setColorAt(
           j,
-          color.set(ringBaseColor(d.node)).multiplyScalar(factor),
+          modeColorInto(color, ring, d.node, match, cleanup).multiplyScalar(
+            factor,
+          ),
         );
       });
       if (domeMesh.instanceColor) domeMesh.instanceColor.needsUpdate = true;
@@ -1330,26 +1416,10 @@ export function buildLevel(
       applyActive();
     },
     setHighlight(match) {
-      paintAll((node, base) => {
-        color.set(base);
-        if (match && !match(node)) color.multiplyScalar(DIM_FACTOR);
-        return color;
-      });
+      paintAll((node, base) => modeColorInto(color, base, node, match, null));
     },
     setCleanup(cleanup) {
-      paintAll((node, base) => {
-        if (!cleanup) {
-          color.set(base);
-          return color;
-        }
-        if (cleanup.isMarked(node)) {
-          color.set(CLEANUP_MARK_COLOR);
-          return color;
-        }
-        color.set(base);
-        if (!cleanup.isCandidate(node)) color.multiplyScalar(DIM_FACTOR);
-        return color;
-      });
+      paintAll((node, base) => modeColorInto(color, base, node, null, cleanup));
     },
     dispose() {
       disposeGroup(group);

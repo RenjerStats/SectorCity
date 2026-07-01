@@ -37,6 +37,15 @@ export type UiCommand =
   | { kind: "reroot" }
   /** Открыть/закрыть панель скрытого. */
   | { kind: "toggleHidden" }
+  /** На уровень вверх (клавиатура: Backspace / Alt+←). Scene берёт предпоследнюю
+   *  крошку и делает `goToCrumb`. No-op на корне. */
+  | { kind: "up" }
+  /** Снять выбор узла (клавиатура: Esc-стек). Эквивалент `clearSelection`. */
+  | { kind: "deselect" }
+  /** Действие над активным узлом с клавиатуры (vision §I.9/§I.10). «Активный» —
+   *  выбранный (карточка), иначе наведённый; `drill`/`properties`/`mark` работают
+   *  по наведённому. Реализует Scene (у него доступ к interaction/drill). */
+  | { kind: "nodeAction"; action: NodeAction }
   /**
    * Навигация к узлу по пути (vision §I.3: клик по результату поиска → «дойти» до
    * здания). Scene перестраивает мир на уровне-родителе узла и восстанавливает
@@ -44,23 +53,21 @@ export type UiCommand =
    */
   | { kind: "navigateTo"; path: string };
 
+/** Действие над узлом, инициированное с клавиатуры (см. `UiCommand.nodeAction`). */
+export type NodeAction =
+  | "drill" // войти в наведённую папку (Enter)
+  | "properties" // открыть карточку наведённого (Space)
+  | "reveal" // показать в проводнике (E)
+  | "hide" // скрыть узел (H)
+  | "copyPath" // копировать путь (Ctrl+C)
+  | "mark"; // пометить/снять на снос — только в cleanup (X)
+
 /** Текущая невыполненная команда; `null` — нет команды (исполнитель её снимает). */
 export const uiCommand = atom<UiCommand | null>(null);
 
 /** Поставить команду из header/sub-header (исполнит подписчик в Scene). */
 export function dispatchCommand(cmd: UiCommand): void {
   uiCommand.set(cmd);
-}
-
-/**
- * Открыта ли панель фильтров в footer (тумблер «Фильтры» в header). Сам фильтр
- * живёт в `candidateFilter`; это только видимость панели управления им.
- */
-export const filtersOpen = atom<boolean>(false);
-
-/** Переключить видимость панели фильтров. */
-export function toggleFilters(): void {
-  filtersOpen.set(!filtersOpen.get());
 }
 
 /**
@@ -76,6 +83,18 @@ export function toggleHidden(): void {
 }
 
 /**
+ * Открыто ли всплывающее окно легенды (кнопка «Легенда» справа в footer).
+ * Легенда (высота=устаревание, цвет=категория) вынесена из полосы footer в
+ * отдельный поповер, чтобы footer по умолчанию нёс размер уровня + путь.
+ */
+export const legendOpen = atom<boolean>(false);
+
+/** Переключить видимость окна легенды. */
+export function toggleLegend(): void {
+  legendOpen.set(!legendOpen.get());
+}
+
+/**
  * Открыт ли модал подтверждения сноса (кнопка «Снести (X)» в режиме cleanup).
  * Слайс 1: модал показывает список и итог, но реального удаления не делает
  * (нужен крейт `trash` — отдельный проход). Закрытие — `Отмена`/Esc.
@@ -85,6 +104,71 @@ export const cleanupConfirmOpen = atom<boolean>(false);
 /** Открыть/закрыть модал подтверждения сноса. */
 export function setCleanupConfirm(open: boolean): void {
   cleanupConfirmOpen.set(open);
+}
+
+/**
+ * Открыто ли контекстное меню ПКМ. Само меню — локальный `$state` в Scene
+ * (владелец 3D), но его «открытость» нужна центральному обработчику хоткеев для
+ * Esc-стека (когда меню открыто, Esc закрывает ИМЕННО его — само меню, а не
+ * снимает выбор/поиск). Scene зеркалит сюда открытие/закрытие.
+ */
+export const contextMenuOpen = atom<boolean>(false);
+
+/** Отразить открытость контекстного меню (пишет Scene). */
+export function setContextMenuOpen(open: boolean): void {
+  contextMenuOpen.set(open);
+}
+
+/**
+ * Открыто ли окно-шпаргалка хоткеев (F1 / «?»). Общепрограммное окно поверх всего
+ * (как настройки), со своим Esc; центральный обработчик его только переключает.
+ */
+export const helpOpen = atom<boolean>(false);
+
+/** Переключить окно шпаргалки хоткеев. */
+export function toggleHelp(): void {
+  helpOpen.set(!helpOpen.get());
+}
+
+/** Явно задать видимость окна шпаргалки. */
+export function setHelpOpen(open: boolean): void {
+  helpOpen.set(open);
+}
+
+/**
+ * Счётчик-«нонс» запроса фокуса в поле поиска (хоткеи «/» и Ctrl+F). Хоткей
+ * инкрементит его; SearchBox подписан и по изменению фокусирует свой input. Через
+ * стор, а не прямой вызов — держим канал «клавиатура → DOM» в стор-мосте (§1).
+ */
+export const searchFocusRequest = atom<number>(0);
+
+/** Попросить фокус в поле поиска (SearchBox сфокусируется по изменению нонса). */
+export function requestSearchFocus(): void {
+  searchFocusRequest.set(searchFocusRequest.get() + 1);
+}
+
+/* ──────────────────────────────── тосты ──────────────────────────────────── */
+
+/**
+ * Кратковременная всплывающая плашка-подтверждение (vision-принцип: любое действие
+ * должно отражаться в UI). Нужна для действий БЕЗ иного видимого следа — прежде
+ * всего «копировать путь» (drill/скрытие/фильтры и так меняют картинку сами).
+ * `id` растёт на каждый показ, чтобы компонент рестартовал таймер авто-скрытия
+ * даже при одинаковом тексте подряд.
+ */
+export interface Toast {
+  id: number;
+  text: string;
+}
+
+/** Текущий тост; `null` — плашки нет. */
+export const toast = atom<Toast | null>(null);
+
+let toastSeq = 0;
+
+/** Показать плашку-подтверждение (авто-скрытие — на стороне компонента Toast). */
+export function showToast(text: string): void {
+  toast.set({ id: ++toastSeq, text });
 }
 
 /* ──────────────────────────────── слот footer ───────────────────────────── */

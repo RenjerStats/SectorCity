@@ -6,8 +6,9 @@
    *   1) занятый слот (`footerSlot`) — сниппет компонента (аварийный люк, задел
    *      под сканер мусора / результаты поиска);
    *   2) scanning      → полоса первичной разметки диска (DiskMapProgress);
-   *   3) filtersOpen   → панель фильтров (FilterPanel);
-   *   4) иначе         → полоса заполнения по категориям + легенда кодирования.
+   *   3) иначе         → полоса заполнения по категориям + легенда кодирования.
+   *
+   * Фильтры (категории / «Прочее») переехали в окно настроек (SettingsPanel).
    *
    * Здесь не только текст: это полноценные виджеты. Новый режим подключается
    * добавлением ветки сюда ИЛИ временным захватом слота из своего компонента.
@@ -16,21 +17,21 @@
   import {
     footerSlot,
     levelSummary,
-    filtersOpen,
     hiddenOpen,
+    legendOpen,
+    toggleLegend,
   } from "../store/ui";
   import DiskMapProgress from "./footer/DiskMapProgress.svelte";
   import DiskFillBar from "./footer/DiskFillBar.svelte";
   import SearchResults from "./footer/SearchResults.svelte";
-  import Legend from "./Legend.svelte";
-  import FilterPanel from "./FilterPanel.svelte";
+  import Breadcrumbs from "./Breadcrumbs.svelte";
   import CleanupPanel from "./CleanupPanel.svelte";
   import HiddenPanel from "./HiddenPanel.svelte";
 
   let override = $derived($footerSlot);
   let mode = $derived($appMode);
-  let filters = $derived($filtersOpen);
   let hidden = $derived($hiddenOpen);
+  let legend = $derived($legendOpen);
   // Активный поиск занимает footer списком результатов (vision §I.3) — приоритет
   // выше фильтров/легенды, но ниже скана.
   let searching = $derived($searchQuery.trim().length > 0);
@@ -47,12 +48,18 @@
     <CleanupPanel />
   {:else if hidden}
     <HiddenPanel />
-  {:else if filters}
-    <FilterPanel />
   {:else}
     <div class="browse">
-      <div class="grow"><DiskFillBar summary={$levelSummary} /></div>
-      <Legend />
+      <div class="size"><DiskFillBar summary={$levelSummary} /></div>
+      <div class="path"><Breadcrumbs /></div>
+      <button
+        class="legend-btn"
+        class:on={legend}
+        aria-pressed={legend}
+        onclick={toggleLegend}
+      >
+        Легенда
+      </button>
     </div>
   {/if}
 </footer>
@@ -72,12 +79,50 @@
   .browse {
     display: flex;
     align-items: center;
-    gap: var(--sp-6);
+    gap: var(--sp-4);
     width: 100%;
     min-width: 0;
   }
-  .grow {
+  /* Слева — полоса размера уровня по категориям; занимает левую часть. */
+  .size {
+    flex: 1 1 40%;
+    min-width: 8rem;
+    max-width: 46%;
+  }
+  /* Правее — интерактивный путь (крошки); тянется, при переполнении прячет root. */
+  .path {
     flex: 1 1 auto;
     min-width: 0;
+    display: flex;
+    justify-content: flex-end;
+    overflow: hidden;
+  }
+  /* Кнопка легенды — прижата к правому краю. */
+  .legend-btn {
+    flex-shrink: 0;
+    font: inherit;
+    font-size: 0.72rem;
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--text-2);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-pill);
+    padding: 0.3rem 0.75rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition:
+      color var(--motion-micro) var(--ease-out),
+      border-color var(--motion-micro) var(--ease-out),
+      background var(--motion-micro) var(--ease-out);
+  }
+  .legend-btn:hover {
+    color: var(--text);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+  .legend-btn.on {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-soft);
   }
 </style>

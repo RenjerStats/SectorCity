@@ -1,0 +1,125 @@
+/**
+ * SectorCity — темы (см. docs/SectorCity-vision.md §II.11, тикет 010).
+ *
+ * Каждый блок `:root[data-theme="…"]` переопределяет ТОЛЬКО семантические токены
+ * (поверхности/текст/акцент/точки/состояния). Структурные токены (радиусы,
+ * отступы, шрифты, motion, тени) — общие, остаются в tokens.css.
+ *
+ * Инварианты (минимализм): ровно один акцент-hue на тему; нейтрали почти
+ * монохромны (различаются светлотой/лёгким тинтом); без градиентов;
+ * `--danger: var(--accent)`; контраст --text/--bg ≥ WCAG AA.
+ *
+ * Числовое зеркало для 3D-слоя (Three не читает CSS) — в src/lib/three/theme.ts.
+ */
+
+/* Graphite / Red — дефолт (воспроизводит текущий :root в tokens.css). */
+:root[data-theme="graphite-red"] {
+  /* поверхности */
+  --bg: #080808;
+  --surface: #121212;
+  --surface-2: #1e1e1e;
+  --overlay: rgba(8, 8, 8, 0.72);
+  --hairline: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.12);
+  /* текст */
+  --text: #ececec;
+  --text-2: #a8a8ad;
+  --text-muted: #6e6e73;
+  /* акцент (единственный) — Nothing red */
+  --accent: #d71921;
+  --accent-hover: #e52931;
+  --accent-press: #b81219;
+  --accent-soft: rgba(215, 25, 33, 0.14);
+  /* точки-дороги */
+  --dot: rgba(255, 255, 255, 0.1);
+  --dot-strong: rgba(255, 255, 255, 0.18);
+  /* семантика состояний */
+  --safe: #46b17b;
+  --stale: #e0a33e;
+  --danger: var(--accent);
+  /* контраст --text/--bg: 16.96:1 (AA OK) */
+}
+
+/* Carbon / Amber — тёплая (нейтраль с лёгким сдвигом в коричневатый). */
+:root[data-theme="carbon-amber"] {
+  /* поверхности */
+  --bg: #0d0d0d;
+  --surface: #161412;
+  --surface-2: #211e1a;
+  --overlay: rgba(13, 13, 13, 0.72);
+  --hairline: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.12);
+  /* текст — тёплый белый */
+  --text: #efe9e0;
+  --text-2: #b6ac9e;
+  --text-muted: #7d7367;
+  /* акцент (единственный) */
+  --accent: #e0a33e;
+  --accent-hover: #eab463;
+  --accent-press: #c1852c;
+  --accent-soft: rgba(224, 163, 62, 0.14);
+  /* точки-дороги */
+  --dot: rgba(255, 255, 255, 0.1);
+  --dot-strong: rgba(255, 255, 255, 0.18);
+  /* семантика состояний */
+  --safe: #4bb17e;
+  --stale: #8a93a6; /* сдвинут от amber, чтобы не сливаться с --accent темы */
+  --danger: var(--accent);
+  /* контраст --text/--bg: 16.12:1 (AA OK) */
+}
+
+/* Slate / Teal — холодная (нейтраль с лёгким сдвигом в сине-зелёный). */
+:root[data-theme="slate-teal"] {
+  /* поверхности */
+  --bg: #0e1316;
+  --surface: #161c20;
+  --surface-2: #1f272c;
+  --overlay: rgba(14, 19, 22, 0.72);
+  --hairline: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.12);
+  /* текст */
+  --text: #e6ecee;
+  --text-2: #a3b0b5;
+  --text-muted: #66757a;
+  /* акцент (единственный) */
+  --accent: #2db3a6;
+  --accent-hover: #3fc7ba;
+  --accent-press: #24968b;
+  --accent-soft: rgba(45, 179, 166, 0.14);
+  /* точки-дороги */
+  --dot: rgba(255, 255, 255, 0.1);
+  --dot-strong: rgba(255, 255, 255, 0.18);
+  /* семантика состояний */
+  --safe: #46b17b;
+  --stale: #e0a33e;
+  --danger: var(--accent);
+  /* контраст --text/--bg: 15.66:1 (AA OK) */
+}
+
+/* Mono / White — «бело-на-чёрном» (чистый нейтральный серый, без тинта). */
+:root[data-theme="mono-white"] {
+  /* поверхности */
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --surface-2: #1e1e1e;
+  --overlay: rgba(10, 10, 10, 0.72);
+  --hairline: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.12);
+  /* текст */
+  --text: #f5f5f5;
+  --text-2: #b0b0b0;
+  --text-muted: #6e6e6e;
+  /* акцент (единственный) — чистый белый */
+  --accent: #ffffff;
+  --accent-hover: #e5e5e5; /* темнее белого: видимый ховер (выше идти некуда) */
+  --accent-press: #d0d0d0;
+  --accent-soft: rgba(255, 255, 255, 0.14);
+  /* точки-дороги */
+  --dot: rgba(255, 255, 255, 0.1);
+  --dot-strong: rgba(255, 255, 255, 0.2);
+  /* семантика состояний — монохром, чтобы не заносить цвет в чёрно-белую тему */
+  --safe: #a0a0a0;
+  --stale: #d0d0d0;
+  --danger: var(--accent);
+  /* контраст --text/--bg: 18.16:1 (AA OK) */
+}

@@ -5,7 +5,7 @@
    *
    * Презентационный shell: кнопки лишь шлют команды в стор (`dispatchCommand`) —
    * исполняет владелец сцены (Scene). Поиск — отдельный компонент, пишет в свой
-   * стор. Выбор темы добавится сюда позже (структура регионов готова).
+   * стор. Слева — кнопка-шестерёнка: всплывающее окно настроек (тема и пр.).
    */
   import {
     appMode,
@@ -14,18 +14,13 @@
     breadcrumbs,
     hiddenPaths,
   } from "../store/mode";
-  import {
-    dispatchCommand,
-    filtersOpen,
-    toggleFilters,
-    setCleanupConfirm,
-  } from "../store/ui";
+  import { dispatchCommand, setCleanupConfirm } from "../store/ui";
+  import { settingsOpen, toggleSettings } from "../store/settings";
   import { formatSize } from "../format";
   import SearchBox from "./SearchBox.svelte";
 
   let busy = $derived($appMode.kind === "scanning");
   let cleanup = $derived($appMode.kind === "cleanup");
-  let filters = $derived($filtersOpen);
   let marked = $derived($markedCount);
   let markedSize = $derived($markedBytes);
   let canReroot = $derived(
@@ -33,12 +28,37 @@
       !$breadcrumbs[$breadcrumbs.length - 1]?.path.endsWith("::<other>"),
   );
   let hiddenCount = $derived($hiddenPaths.length);
+  let settings = $derived($settingsOpen);
 </script>
 
 <header class="header">
   <div class="region brand">
-    <span class="brand-dot" aria-hidden="true"></span>
-    <span class="brand-name">SECTORCITY</span>
+    <button
+      class="settings-btn"
+      class:on={settings}
+      aria-pressed={settings}
+      aria-label="Настройки"
+      onclick={toggleSettings}
+    >
+      <svg
+        class="gear"
+        viewBox="0 0 24 24"
+        width="16"
+        height="16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="3.2" />
+        <path
+          d="M12 2.2v2.6M12 19.2v2.6M2.2 12h2.6M19.2 12h2.6M4.9 4.9l1.9 1.9M17.2 17.2l1.9 1.9M19.1 4.9l-1.9 1.9M6.8 17.2l-1.9 1.9"
+        />
+      </svg>
+      <span class="settings-label">Настройки</span>
+    </button>
     {#if cleanup}
       <span class="chip-cleanup">СКАНЕР МУСОРА</span>
     {/if}
@@ -80,14 +100,6 @@
         onclick={() => dispatchCommand({ kind: "enterCleanup" })}
       >
         Сканер мусора
-      </button>
-      <button
-        class="btn"
-        class:on={filters}
-        aria-pressed={filters}
-        onclick={toggleFilters}
-      >
-        Фильтры
       </button>
       {#if hiddenCount > 0}
         <button
@@ -137,20 +149,50 @@
     flex-shrink: 0;
   }
 
-  /* Бренд — dot-matrix, с фирменной красной точкой-акцентом. */
-  .brand-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 10px var(--accent-soft);
-  }
-  .brand-name {
-    font-family: var(--font-display);
-    font-size: 1.2rem; /* крупнее — dot-matrix глифы Ndot77 читаются точками */
-    letter-spacing: var(--track-caps);
+  /* Кнопка-шестерёнка (слева) — вход в окно настроек вместо wordmark. */
+  .settings-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    font: inherit;
+    font-size: 0.8rem;
+    letter-spacing: 0.02em;
     color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-pill);
+    padding: 0.35rem 0.85rem 0.35rem 0.6rem;
+    cursor: pointer;
     white-space: nowrap;
+    transition:
+      background var(--motion-micro) var(--ease-out),
+      border-color var(--motion-micro) var(--ease-out),
+      color var(--motion-micro) var(--ease-out);
+  }
+  .settings-btn:hover {
+    background: #232327;
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+  .settings-btn:active {
+    transform: translateY(0.5px);
+  }
+  .settings-btn.on {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .gear {
+    display: block;
+    transition: transform var(--motion-base) var(--ease-out);
+  }
+  .settings-btn:hover .gear {
+    transform: rotate(35deg);
+  }
+  .settings-label {
+    font-family: var(--font-label, inherit);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    font-size: 0.72rem;
   }
 
   /* Кнопки оболочки — матовый «премиум-пластик», скруглённые. */
@@ -201,12 +243,6 @@
     border-radius: var(--r-pill);
     padding: 0.15rem 0.55rem;
     white-space: nowrap;
-  }
-  /* Активный тумблер (Фильтры открыты) — подсветка единственным акцентом. */
-  .btn.on {
-    color: var(--accent);
-    border-color: var(--accent);
-    background: var(--accent-soft);
   }
   .btn-primary {
     color: #fff;

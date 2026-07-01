@@ -223,10 +223,21 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
   let levelSpans = new Map<string, { w: number; d: number }>();
 
   /** Применить облик к уровню: подсветка-фильтр, поверх неё — вид очистки (если он
-   *  включён). Зовётся при каждой смене активного уровня (reset/rebuild/drill/up). */
+   *  включён). Зовётся при каждой смене активного уровня (reset/rebuild/drill/up) и
+   *  при создании декор-слоя. Работает и для декора: красит только per-instance цвет
+   *  (paintAll), а затемнение декора держит отдельный material-множитель (decorDim),
+   *  поэтому режим виден и в контексте, просто приглушённее активного. */
   function applyAppearance(level: Level): void {
     level.setHighlight(currentMatch);
     if (cleanupView) level.setCleanup(cleanupView);
+  }
+
+  /** Переприменить облик режима ко ВСЕМ слоям (активный + декор). Нужно, чтобы режим
+   *  (поиск/cleanup) отражался и в окружении, и переживал навигацию: без этого декор
+   *  оставался бы нейтральным, «игнорируя» режим (см. drill/appendFarAncestor). */
+  function applyAppearanceAll(): void {
+    if (active) applyAppearance(active);
+    for (const layer of decorStack) applyAppearance(layer.level);
   }
 
   function setActiveView(level: Level | null): void {
@@ -373,12 +384,14 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
         // самого района `node` скрываем — иначе он накрыл бы новый активный уровень.
         const t0 = composeInverse(g, identityTransform());
         applyLayerTransform(fromActive.group, t0);
-        fromActive.setHighlight(null); // декор — нейтральный контекст, без подсветки
-        // setHighlight выше вернул базовые per-instance цвета (снял `setEnterDim`), а
-        // здесь ставим итоговый декор-облик. Затемнение уже доведено до `targetDim` ЗА
-        // время зума (`onProgress`), поэтому на свопе пиксель тот же — хвостового фейда
-        // нет (раньше L1 рождался с 1.0 и темнел уже ПОСЛЕ прилёта).
+        // Декор-облик: сначала матрицы/затемнение (setDecor), затем per-instance цвет
+        // режима (applyAppearance) — так контекст НЕ нейтрален, а отражает cleanup/поиск
+        // (vision-правило «режим действует на всю сцену, а не только активную папку»).
+        // applyAppearance через paintAll заодно снимает `setEnterDim`-серости зума.
+        // Затемнение доведено до `targetDim` ЗА время зума (`onProgress`) → на свопе
+        // пиксель тот же, хвостового фейда нет.
         fromActive.setDecor(node.path, budgetFromS(t0.scale), targetDim);
+        applyAppearance(fromActive);
         decorStack.unshift({
           level: fromActive,
           transform: t0,
@@ -419,7 +432,14 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
         // раскрываемого района уезжает вверх и тает, а купола дочерних папок
         // «надеваются» — опускаются на свои постаменты (зеркало `enterDome`).
         const e = Easing.Cubic.InOut(p);
-        fromActive.setEnterDim(node.path, 1 + (targetDim - 1) * e);
+        // Периметр гаснет, СОХРАНЯЯ облик режима (передаём currentMatch/cleanupView):
+        // во время зума совпадения/метки не «сбрасываются» в категорийный цвет.
+        fromActive.setEnterDim(
+          node.path,
+          1 + (targetDim - 1) * e,
+          currentMatch,
+          cleanupView,
+        );
         enterDome?.setProgress(p);
         childDomes.setProgress(1 - p);
       },
@@ -556,10 +576,10 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     const budget = budgetFromS(t.scale); // зум-зависимый бюджет по его `S_k` (§5)
     content.add(gp.group);
     applyLayerTransform(gp.group, t);
-    gp.setHighlight(null); // декор — нейтральный контекст
     // Силуэт ребёнка скрыт (его рисует свой слой), сразу со срезанным LOD-бюджетом (§4).
     // Появляется из фона (dim=0) — `updateFade` проявит до `colorFactorFromS(S)` (§6/§7).
     gp.setDecor(childLevel.path, budget, 0);
+    applyAppearance(gp); // дочитанный декор тоже несёт облик режима (не нейтрален)
     decorStack.push({
       level: gp,
       transform: t,
@@ -594,7 +614,9 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
 
   function applyHighlight(match: ((node: ScanNode) => boolean) | null): void {
     currentMatch = match;
-    if (active) applyAppearance(active); // фильтр под видом очистки (если он включён)
+    // Подсветка-фильтр под видом очистки; переприменяем ко всем слоям — окружение
+    // светит/гаснет вместе с активным уровнем (не только активная папка).
+    applyAppearanceAll();
   }
 
   function setCleanup(
@@ -604,12 +626,10 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
     } | null,
   ): void {
     cleanupView = view;
-    if (!active) return;
-    if (view) active.setCleanup(view);
-    else {
-      active.setCleanup(null); // снять красный/дим
-      active.setHighlight(currentMatch); // вернуть подсветку-фильтр
-    }
+    // Вид очистки (или его снятие) — на все слои: кандидаты/красные метки видны и в
+    // контексте. `applyAppearance` при `cleanupView=null` вернёт подсветку-фильтр
+    // (setHighlight), сняв красный/дим предыдущего вида.
+    applyAppearanceAll();
   }
 
   function inspect(): NavInspect {

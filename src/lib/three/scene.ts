@@ -118,6 +118,119 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
   controls.target.copy(INITIAL_TARGET);
   controls.update();
 
+  // WASD-панорама камеры (игровая раскладка вместо стрелок). Держим в 3D-слое,
+  // как и мышиные MapControls, — это управление камерой, а не UI-хоткей. Ключи по
+  // `event.code` (физическая позиция) → работает на любой раскладке (в т.ч. ЙЦУКЕН).
+  // Плавное движение: набор зажатых кодов + интегрирование в кадре (damping даёт
+  // инерцию через сам controls.update). Скорость масштабируем расстоянием до цели,
+  // чтобы панорама ощущалась одинаково на любом зуме.
+  const PAN_CODES: Record<string, [number, number]> = {
+    KeyW: [0, 1], // вперёд (от камеры)
+    KeyS: [0, -1], // назад
+    KeyA: [-1, 0], // влево
+    KeyD: [1, 0], // вправо
+  };
+  // Зум с клавиатуры «+/−» — чистый дубль колеса мыши (приблизить/отдалить). Коды
+  // физические: «=/+» (Equal) и «-» (Minus) + их numpad-варианты, поэтому раскладка
+  // и Shift не важны. Приближение = уменьшение дистанции до цели (в границах контролов).
+  const ZOOM_CODES: Record<string, number> = {
+    Equal: 1,
+    NumpadAdd: 1, // приблизить
+    Minus: -1,
+    NumpadSubtract: -1, // отдалить
+  };
+  const panHeld = new Set<string>();
+  const zoomHeld = new Set<string>();
+  const panForward = new Vector3();
+  const panRight = new Vector3();
+  const panMove = new Vector3();
+  const camOffset = new Vector3();
+  const WORLD_UP = new Vector3(0, 1, 0);
+  /** Доля дистанции до цели, проходимая за кадр при полном нажатии (≈60 к/с). */
+  const PAN_SPEED = 0.012;
+  /** Доля дистанции, на которую «наезжает» зум за кадр удержания «+/−». */
+  const ZOOM_RATE = 0.03;
+
+  /** Фокус в текстовом поле — тогда WASD это набор текста, камеру не двигаем. */
+  function isTypingTarget(): boolean {
+    const el = document.activeElement as HTMLElement | null;
+    if (!el) return false;
+    const tag = el.tagName;
+    return (
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      tag === "SELECT" ||
+      el.isContentEditable
+    );
+  }
+  function onPanKeyDown(e: KeyboardEvent) {
+    // Ctrl/Alt/Meta-комбинации — это хоткеи (Ctrl+W и пр.), не управление камерой.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (isTypingTarget()) return;
+    if (e.code in PAN_CODES) panHeld.add(e.code);
+    else if (e.code in ZOOM_CODES) zoomHeld.add(e.code);
+  }
+  function onPanKeyUp(e: KeyboardEvent) {
+    panHeld.delete(e.code);
+    zoomHeld.delete(e.code);
+  }
+  // Сброс при потере фокуса окна: иначе «залипнет» зажатая клавиша.
+  function onBlur() {
+    panHeld.clear();
+    zoomHeld.clear();
+  }
+
+  /** Проинтегрировать панораму за кадр по зажатым WASD (в плоскости земли). */
+  function applyPan() {
+    if (panHeld.size === 0 || !controls.enabled) return;
+    // forward = направление камеры, спроецированное на землю (XZ); right ⟂ ему.
+    camera.getWorldDirection(panForward);
+    panForward.y = 0;
+    if (panForward.lengthSq() < 1e-6) return; // взгляд строго вниз — пропускаем
+    panForward.normalize();
+    panRight.crossVectors(panForward, WORLD_UP).normalize();
+    let fwd = 0;
+    let strafe = 0;
+    for (const code of panHeld) {
+      const [sx, sz] = PAN_CODES[code];
+      strafe += sx;
+      fwd += sz;
+    }
+    if (fwd === 0 && strafe === 0) return;
+    const step = camera.position.distanceTo(controls.target) * PAN_SPEED;
+    panMove
+      .set(0, 0, 0)
+      .addScaledVector(panForward, fwd)
+      .addScaledVector(panRight, strafe);
+    if (panMove.lengthSq() === 0) return;
+    panMove.normalize().multiplyScalar(step);
+    camera.position.add(panMove);
+    controls.target.add(panMove);
+  }
+
+  /** Проинтегрировать зум за кадр по зажатым «+/−» (дубль колеса): двигаем камеру
+   *  вдоль луча к цели, дистанцию клампим границами контролов. */
+  function applyZoom() {
+    if (zoomHeld.size === 0 || !controls.enabled) return;
+    let dir = 0;
+    for (const code of zoomHeld) dir += ZOOM_CODES[code];
+    if (dir === 0) return; // «+» и «−» одновременно — гасят друг друга
+    camOffset.copy(camera.position).sub(controls.target);
+    const dist = camOffset.length();
+    if (dist < 1e-6) return;
+    const factor = dir > 0 ? 1 - ZOOM_RATE : 1 + ZOOM_RATE;
+    const next = Math.max(
+      controls.minDistance,
+      Math.min(controls.maxDistance, dist * factor),
+    );
+    camOffset.setLength(next);
+    camera.position.copy(controls.target).add(camOffset);
+  }
+
+  window.addEventListener("keydown", onPanKeyDown);
+  window.addEventListener("keyup", onPanKeyUp);
+  window.addEventListener("blur", onBlur);
+
   // Твины камеры (drill-зум) и покадровые колбэки слоёв крутятся в этом же rAF.
   const tweens = new TweenGroup();
   const frameCallbacks = new Set<() => void>();
@@ -139,6 +252,8 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
   function tick() {
     if (!running) return;
     tweens.update();
+    applyPan();
+    applyZoom();
     controls.update();
     for (const cb of frameCallbacks) cb();
     renderer.render(scene, camera);
@@ -206,6 +321,9 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
     dispose() {
       running = false;
       frameCallbacks.clear();
+      window.removeEventListener("keydown", onPanKeyDown);
+      window.removeEventListener("keyup", onPanKeyUp);
+      window.removeEventListener("blur", onBlur);
       observer.disconnect();
       controls.dispose();
       envRT.dispose();

@@ -1,11 +1,11 @@
 <script lang="ts">
   /**
-   * Sub-header: хлебные крошки навигации (docs/SectorCity-vision.md §I.11 —
-   * «крошки отдельной тонкой полосой под header»). Презентационный: читает стек
-   * `breadcrumbs` из стора, клик шлёт команду `goToCrumb` (исполняет Scene).
+   * Хлебные крошки навигации (интерактивный путь). Переехали из sub-header под
+   * header в footer (правее полосы размера уровня): читают стек `breadcrumbs` из
+   * стора, клик шлёт команду `goToCrumb` (исполняет Scene).
    *
-   * Всегда рендерит контейнер (грид-ячейку): пустой/во время скана — схлопывается
-   * в 0 высоты, чтобы не ломать раскладку грида оболочки.
+   * Inline-форма без собственного хрома (фон/границу даёт полоса footer). Нет
+   * крошек / идёт скан — не рендерится (footer в этих состояниях занят другим).
    */
   import { appMode, breadcrumbs } from "../store/mode";
   import { dispatchCommand } from "../store/ui";
@@ -16,8 +16,8 @@
   let shown = $derived(crumbs.length > 0 && !busy);
 </script>
 
-<nav class="subheader" class:empty={!shown} aria-label="Навигация по уровням">
-  {#if shown}
+{#if shown}
+  <nav class="crumbs" aria-label="Навигация по уровням">
     {#each crumbs as crumb, i (crumb.path)}
       {#if i > 0}<span class="sep">›</span>{/if}
       <button
@@ -29,26 +29,20 @@
         {crumb.name}
       </button>
     {/each}
-  {/if}
-</nav>
+  </nav>
+{/if}
 
 <style>
-  .subheader {
+  /* Inline-крошки в footer: одна строка, при переполнении прячем НАЧАЛО (root),
+     хвост с текущей папкой прижат вправо и остаётся виден. */
+  .crumbs {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    justify-content: flex-end;
     gap: 0.15rem;
-    height: 2rem;
-    padding: 0 var(--sp-4);
-    background: var(--surface);
-    border-bottom: 1px solid var(--hairline);
+    min-width: 0;
     overflow: hidden;
-  }
-  /* Нет крошек / идёт скан — полоса схлопнута, но грид-ячейка сохранена. */
-  .subheader.empty {
-    height: 0;
-    padding: 0;
-    border-bottom: none;
   }
   .crumb {
     font: inherit;
@@ -59,6 +53,8 @@
     padding: 0.1rem 0.25rem;
     border-radius: var(--r-sm);
     cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
     transition: background var(--motion-micro) var(--ease-out);
   }
   .crumb.current {
@@ -74,5 +70,6 @@
   .sep {
     color: var(--text-muted);
     font-size: 0.8rem;
+    flex-shrink: 0;
   }
 </style>

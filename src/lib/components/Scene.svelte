@@ -52,9 +52,13 @@
     uiCommand,
     levelSummary,
     setCleanupConfirm,
+    setContextMenuOpen,
     hiddenOpen,
     toggleHidden,
+    showToast,
+    type NodeAction,
   } from "../store/ui";
+  import { restoreLastScan } from "../store/settings";
   import type {
     AggSpec,
     Category,
@@ -86,6 +90,13 @@
     x: number;
     y: number;
   } | null>(null);
+
+  /** Задать/снять контекстное меню и зеркалить его открытость в стор (для Esc-стека
+   *  центрального обработчика хоткеев, см. ui.ts `contextMenuOpen`). */
+  function setMenu(m: typeof contextMenu): void {
+    contextMenu = m;
+    setContextMenuOpen(m !== null);
+  }
 
   // Состояние центрального оверлея (приветствие/пусто/ошибка/отмена). Низко-
   // частотное — обычный $state; "none" = город виден, оверлей не рисуется.
@@ -366,9 +377,11 @@
       // ПКМ → контекстное меню (vision §I.10). Клик мимо зданий (info=null) —
       // меню не показываем (закрываем текущее).
       onContext: (info, x, y) => {
-        contextMenu = info
-          ? { node: info.node, drillTarget: info.drillTarget, x, y }
-          : null;
+        setMenu(
+          info
+            ? { node: info.node, drillTarget: info.drillTarget, x, y }
+            : null,
+        );
       },
     });
 
@@ -403,11 +416,9 @@
       place(hoverEl, interaction.hoverAnchor());
     });
 
-    // ESC — снять выбор (закрыть карточку). Глобально, т.к. фокус на canvas.
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") interaction?.clearSelection();
-    };
-    window.addEventListener("keydown", onKey);
+    // Клавиатура (Esc-стек, drill/свойства, действия над узлом) централизована в
+    // hotkeys.ts (единственный владелец keydown). Сцена лишь исполняет команды
+    // `uiCommand` (см. offCmd ниже) — прямого слушателя клавиш здесь больше нет.
 
     // Подсветка: фильтр кандидатов И поиск по имени → один предикат навигатору.
     // subscribe срабатывает сразу с текущим значением — nav уже создан выше.
@@ -530,6 +541,15 @@
         case "navigateTo":
           void navigateToResult(c.path);
           break;
+        case "up":
+          void goUp();
+          break;
+        case "deselect":
+          interaction?.clearSelection();
+          break;
+        case "nodeAction":
+          handleNodeAction(c.action);
+          break;
       }
     });
 
@@ -554,10 +574,15 @@
         // Вне Tauri событий нет — ожидаемо в чистом vite.
       });
 
-    // Старт: если есть снимок прошлого скана — поднимаем его без рескана,
-    // иначе показываем мок верхнего уровня (корень "" → бэк отдаёт мок).
+    // Старт: если включено восстановление и есть снимок прошлого скана — поднимаем
+    // его без рескана, иначе показываем мок верхнего уровня (корень "" → бэк отдаёт
+    // мок) с приветствием. Восстановление отключается в настройках (вкладка
+    // «Сохранение»); тогда даже при наличии снимка стартуем на демо-городе.
     appMode.set({ kind: "scanning", progress: 0 });
-    currentRoot()
+    const rootPromise = restoreLastScan.get()
+      ? currentRoot()
+      : Promise.resolve(null);
+    rootPromise
       .then(async (root) => {
         const target = root ?? "";
         await loadRoot(target);
@@ -587,7 +612,6 @@
       offMarks();
       if (aggTimer) clearTimeout(aggTimer);
       offCmd();
-      window.removeEventListener("keydown", onKey);
       unlisten?.();
       interaction?.dispose();
       nav?.dispose();
@@ -736,6 +760,59 @@
     handle?.resetView();
   }
 
+  /** На уровень вверх (хоткей Backspace / Alt+←): прыжок на предпоследнюю крошку.
+   *  No-op на корне (одна крошка) — как дизейбл кнопки «назад». */
+  function goUp() {
+    const crumbs = $breadcrumbs;
+    if (crumbs.length >= 2) void goToCrumb(crumbs.length - 2);
+  }
+
+  /** Узел для действия с клавиатуры: выбранный (карточка) в приоритете, иначе
+   *  наведённый — «правда под курсором/в фокусе» (vision §I.9). */
+  function actionNode(): ScanNode | null {
+    return selectedNode.get() ?? hoveredNode.get();
+  }
+
+  /** Диспетчер действий над узлом с клавиатуры (vision §I.9/§I.10). `drill`,
+   *  `properties` и `mark` работают строго по НАВЕДЁННОМУ (это «объект под
+   *  курсором»); reveal/hide/copy — по активному (выбранный ∥ наведённый).
+   *  Синтетический блок «Мелочь» (`aggregated`) реального пути не имеет —
+   *  reveal/hide/copy/mark по нему пропускаем; системные (`locked`) не помечаем. */
+  function handleNodeAction(action: NodeAction) {
+    switch (action) {
+      case "drill": {
+        const n = hoveredNode.get();
+        if (n && (n.isDir || n.flags.includes("aggregated"))) void drill(n);
+        break;
+      }
+      case "properties":
+        interaction?.selectHovered();
+        break;
+      case "reveal": {
+        const n = actionNode();
+        if (n && !n.flags.includes("aggregated")) void revealNode(n.path);
+        break;
+      }
+      case "copyPath": {
+        const n = actionNode();
+        if (n && !n.flags.includes("aggregated")) void copyPathAction(n.path);
+        break;
+      }
+      case "hide": {
+        const n = actionNode();
+        if (n && !n.flags.includes("aggregated")) hideSelected(n.path);
+        break;
+      }
+      case "mark": {
+        if (appMode.get().kind !== "cleanup") break;
+        const n = hoveredNode.get();
+        if (n && !n.flags.includes("locked") && !n.flags.includes("aggregated"))
+          toggleMark(n.path, n.size);
+        break;
+      }
+    }
+  }
+
   /**
    * «Сделать эту папку корнем» (тикет 007): жёсткое переоткрытие текущего уровня
    * как нового корня — стек крошек сбрасывается до него, город перестраивается с
@@ -777,12 +854,16 @@
     interaction?.clearSelection();
   }
 
-  /** «Копировать путь» (карточка / ПКМ). Ошибку (нет доступа к буферу) — в лог. */
+  /** «Копировать путь» (карточка / ПКМ / хоткей Ctrl+C). Успех подтверждаем
+   *  плашкой-тостом (vision: действие обязано отражаться в UI — у копирования нет
+   *  иного видимого следа). Ошибку (нет доступа к буферу) — в лог + тост. */
   async function copyPathAction(path: string) {
     try {
       await copyPath(path);
+      showToast("Скопировано в буфер обмена");
     } catch (err) {
       console.warn("копирование пути не удалось:", err);
+      showToast("Не удалось скопировать путь");
     }
   }
 
@@ -909,7 +990,7 @@
       cleanup={$appMode.kind === "cleanup"}
       marked={$markedForCleanup.has(contextMenu.node.path)}
       onOpen={(node) => {
-        contextMenu = null;
+        setMenu(null);
         void drill(node);
       }}
       onReveal={revealNode}
@@ -920,7 +1001,7 @@
         if (node.flags.includes("locked")) return;
         toggleMark(node.path, node.size);
       }}
-      onClose={() => (contextMenu = null)}
+      onClose={() => setMenu(null)}
     />
   {/if}
 </div>
