@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
-   * Окно настроек (§II.11) — всплывает по кнопке-шестерёнке в шапке слева.
-   * Поповер, заякоренный под левым краем header; закрытие по scrim/✕/Esc.
+   * Окно настроек (§II.11) — всплывает по кнопке-шестерёнке в шапке справа.
+   * Поповер, заякоренный под правым краем header; закрытие по scrim/✕/Esc.
    *
    * Разбито на вкладки по типу настроек:
    *   - Визуальные   — тема (палитра всего UI + 3D-акцент);
@@ -25,6 +25,9 @@
     resetSettings,
     AGG_FRACTION_MIN,
     AGG_FRACTION_MAX,
+    graphicsLevel,
+    setGraphicsLevel,
+    GRAPHICS_ORDER,
   } from "../store/settings";
   import {
     aggSettings,
@@ -49,6 +52,7 @@
 
   let open = $derived($settingsOpen);
   let current = $derived($theme);
+  let graphics = $derived($graphicsLevel);
   // Порог свёртки как проценты (ползунок 1–20%) — SoT хранит долю (0.01–0.20).
   let aggPercent = $derived(Math.round($aggSettings.fraction * 100));
   let restore = $derived($restoreLastScan);
@@ -125,6 +129,32 @@
           <p class="note">
             Цвет категорий зданий одинаков во всех темах — так задумано для
             читаемости. Меняются акценты и поверхности интерфейса.
+          </p>
+        </section>
+
+        <section class="section">
+          <h3 class="section-title">Качество графики</h3>
+          <div class="themes">
+            {#each GRAPHICS_ORDER as g (g.level)}
+              <button
+                class="theme graphics"
+                class:active={graphics === g.level}
+                aria-pressed={graphics === g.level}
+                onclick={() => setGraphicsLevel(g.level)}
+              >
+                <span class="theme-text">
+                  <span class="theme-label">{g.label}</span>
+                  <span class="theme-sub">{g.sub}</span>
+                </span>
+                {#if graphics === g.level}
+                  <span class="check" aria-hidden="true">✓</span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+          <p class="note">
+            Минимальный отключает матовое стекло и металл — заметно легче для
+            слабых видеокарт. Меняется мгновенно, город пересобирается.
           </p>
         </section>
       {:else if tab === "display"}
@@ -253,7 +283,8 @@
   .panel {
     position: fixed;
     top: calc(var(--header-h) + var(--sp-2));
-    left: var(--sp-4);
+    /* Шестерёнка в правом кластере действий → окно якорим у правого края. */
+    right: var(--sp-4);
     width: min(24rem, calc(100vw - 2rem));
     max-height: calc(100vh - var(--header-h) - var(--sp-6));
     overflow-y: auto;
@@ -372,6 +403,18 @@
   }
   .theme-label {
     flex: 1 1 auto;
+  }
+  /* Строка уровня графики: заголовок + пояснение в столбик (как тумблеры). */
+  .graphics .theme-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    flex: 1 1 auto;
+  }
+  .graphics .theme-sub {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    line-height: 1.35;
   }
   .check {
     color: var(--accent);

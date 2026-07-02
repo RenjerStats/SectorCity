@@ -24,6 +24,7 @@ import { MapControls } from "three/examples/jsm/controls/MapControls.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { Easing, Group as TweenGroup, Tween } from "@tweenjs/tween.js";
 import { INITIAL_CAMERA_POS, INITIAL_TARGET } from "./home";
+import { quality } from "./quality";
 
 /** Ручка управления сценой для владельца (Svelte-компонента) и слоёв. */
 export interface SceneHandle {
@@ -68,11 +69,38 @@ export interface SceneHandle {
    * кадра после пересборки).
    */
   compile(): Promise<void>;
+  /**
+   * Применить активный уровень графики (`quality.active`) к рендеру: кап
+   * pixelRatio и разрешение прохода transmission-стекла. Зовётся при смене уровня
+   * в настройках. Материалы уровня (стекло/металл/PBR) подхватывает пересборка
+   * города — не здесь. MSAA не трогаем (нельзя без пересоздания контекста).
+   */
+  applyQuality(): void;
   /** Вернуть камеру в исходный обзорный ракурс. `ms > 0` — плавный твин
    *  (как drill), иначе мгновенно. */
   resetView(ms?: number): void;
   /** Освободить GPU-ресурсы и снять слушатели. Вызывать при размонтировании. */
   dispose(): void;
+}
+
+/**
+ * Залогировать реальную видеокарту, обслуживающую WebGL-контекст (через
+ * `WEBGL_debug_renderer_info` → `UNMASKED_RENDERER_WEBGL`). Диагностика форса
+ * дискретной GPU: если в логе iGPU (Intel/AMD Radeon Graphics), значит
+ * `powerPreference` + запись `UserGpuPreferences` в реестр не сработали. Ошибки
+ * глотаем — расширение доступно не везде.
+ */
+function logGpuRenderer(renderer: WebGLRenderer): void {
+  try {
+    const gl = renderer.getContext();
+    const ext = gl.getExtension("WEBGL_debug_renderer_info");
+    if (ext) {
+      const name = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL);
+      console.info("[SectorCity] GPU (WebGL renderer):", name);
+    }
+  } catch {
+    /* диагностика необязательна */
+  }
 }
 
 /**
@@ -90,7 +118,18 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
     powerPreference: "high-performance",
     failIfMajorPerformanceCaveat: false,
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // Кап плотности пикселей и разрешение прохода transmission-стекла — из активного
+  // уровня графики (`quality.active`). Кап срезает фрагменты на HiDPI (DPR 2 = 4×
+  // пикселей); transmission куполов — второй полный проход opaque-сцены каждый кадр,
+  // его таргет рендерим в доле разрешения (содержимое и так размыто «морозом» по
+  // мипам, деградация почти не видна). Меняется живьём в `applyQuality`.
+  renderer.setPixelRatio(
+    Math.min(window.devicePixelRatio, quality.active.pixelRatioCap),
+  );
+  renderer.transmissionResolutionScale =
+    quality.active.transmissionResolutionScale;
+
+  logGpuRenderer(renderer);
 
   const scene = new Scene();
   scene.background = new Color(0x080808); // = --bg (Nothing deep black, синхр. с DOM)
@@ -344,6 +383,14 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
       } catch (err) {
         console.warn("прекомпиляция шейдеров не удалась:", err);
       }
+    },
+    applyQuality() {
+      renderer.setPixelRatio(
+        Math.min(window.devicePixelRatio, quality.active.pixelRatioCap),
+      );
+      renderer.transmissionResolutionScale =
+        quality.active.transmissionResolutionScale;
+      resize(); // пере-применить размер буфера под новый pixelRatio
     },
     resetView(ms) {
       if (ms && ms > 0) {

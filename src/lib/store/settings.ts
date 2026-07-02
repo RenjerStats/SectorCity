@@ -12,6 +12,12 @@
  */
 import { atom } from "nanostores";
 import { DEFAULT_THEME, THEMES_3D, type ThemeName } from "../three/theme";
+import {
+  DEFAULT_GRAPHICS,
+  QUALITY,
+  setActiveQuality,
+  type GraphicsLevel,
+} from "../three/quality";
 import { aggSettings } from "./mode";
 
 const STORAGE_KEY = "sectorcity:theme";
@@ -67,6 +73,67 @@ export function setTheme(name: ThemeName): void {
     localStorage.setItem(STORAGE_KEY, name);
   } catch {
     // Не критично: тема применится, просто не переживёт перезапуск.
+  }
+}
+
+/* ────────────────────────── качество графики (рендер) ────────────────────── */
+
+/** Уровни графики для пикера: уровень + подпись + пояснение. Порядок = показ. */
+export const GRAPHICS_ORDER: {
+  level: GraphicsLevel;
+  label: string;
+  sub: string;
+}[] = [
+  {
+    level: "minimal",
+    label: "Минимальный",
+    sub: "Дешёвые материалы: без матового стекла и металла. Для слабых машин.",
+  },
+  {
+    level: "optimal",
+    label: "Оптимальный",
+    sub: "Матовое стекло куполов и металл плит, сбалансированная нагрузка.",
+  },
+  {
+    level: "maximal",
+    label: "Максимальный",
+    sub: "Полное разрешение стекла и пикселей, гладкая тесселяция.",
+  },
+];
+
+const GRAPHICS_KEY = "sectorcity:graphics";
+
+function isGraphics(v: string | null): v is GraphicsLevel {
+  return v != null && v in QUALITY;
+}
+
+function initialGraphics(): GraphicsLevel {
+  try {
+    const saved = localStorage.getItem(GRAPHICS_KEY);
+    if (isGraphics(saved)) return saved;
+  } catch {
+    // localStorage недоступен — дефолт ниже.
+  }
+  return DEFAULT_GRAPHICS;
+}
+
+/**
+ * Активный уровень графики. SoT для сцены/строителей материалов — зеркалим его в
+ * `quality.active` (three/quality) СРАЗУ при инициализации, ДО монтирования сцены,
+ * чтобы первый же город собрался с правильными материалами.
+ */
+export const graphicsLevel = atom<GraphicsLevel>(initialGraphics());
+setActiveQuality(graphicsLevel.get());
+
+/** Сменить уровень графики: стор + зеркало в `quality.active` + сохранение.
+ *  Применение (рендер-параметры + пересборка города) делает подписчик в сцене. */
+export function setGraphicsLevel(level: GraphicsLevel): void {
+  graphicsLevel.set(level);
+  setActiveQuality(level);
+  try {
+    localStorage.setItem(GRAPHICS_KEY, level);
+  } catch {
+    // Не критично — просто не переживёт перезапуск.
   }
 }
 
@@ -142,13 +209,14 @@ export function setRestoreLastScan(v: boolean): void {
 /** Сбросить все настройки к значениям по умолчанию. */
 export function resetSettings(): void {
   setTheme(DEFAULT_THEME);
+  setGraphicsLevel(DEFAULT_GRAPHICS);
   aggSettings.set({ fraction: AGG_FRACTION_DEFAULT });
   setRestoreLastScan(true);
 }
 
 /* ──────────────────────────── видимость окна ─────────────────────────────── */
 
-/** Открыто ли окно настроек (всплывает по кнопке-шестерёнке в шапке слева). */
+/** Открыто ли окно настроек (всплывает по кнопке-шестерёнке в шапке справа). */
 export const settingsOpen = atom<boolean>(false);
 
 /** Переключить видимость окна настроек. */

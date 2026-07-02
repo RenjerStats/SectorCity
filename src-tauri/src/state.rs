@@ -4,7 +4,7 @@
 //! SQLite (быстрое переоткрытие/diff) ляжет рядом отдельной фазой.
 
 use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
@@ -14,7 +14,10 @@ use crate::scan::ScanTree;
 #[derive(Default)]
 pub struct AppState {
     /// Дерево последнего успешного скана; `None` до первого `start_scan`.
-    pub scan: Mutex<Option<ScanTree>>,
+    /// Обёрнуто в `Arc`, чтобы фоновая запись снимка держала свою ссылку и не
+    /// блокировала читателей (`get_level` и пр.) на время дисковой записи —
+    /// перезапись снимка ушла с критического пути завершения скана.
+    pub scan: Mutex<Option<Arc<ScanTree>>>,
     /// Токен отмены текущего скана; `Some` пока скан выполняется.
     pub scan_cancel: Mutex<Option<CancellationToken>>,
     /// Снимок прошлого скана ещё читается из SQLite в фоне (см. `setup` в lib.rs).

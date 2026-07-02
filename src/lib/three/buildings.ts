@@ -30,6 +30,7 @@ import {
   type BufferGeometry,
   Color,
   type Material,
+  MeshLambertMaterial,
   MeshPhysicalMaterial,
   MeshStandardMaterial,
 } from "three";
@@ -42,6 +43,7 @@ import {
   GLASS_PANEL_COLOR,
   STEEL_COLOR,
 } from "./palette";
+import { quality } from "./quality";
 
 /** Геометрия + материалы + эталонные цвета одного типа здания. */
 export interface BuildingDef {
@@ -98,40 +100,47 @@ function part(parts: BufferGeometry[]): BufferGeometry {
 }
 
 // --- Материалы (4 типа). Цвет = «эталонный»; per-instance цвет домножает состояние. ---
+// На `quality.active.pbr = false` (минимальный уровень) все они деградируют в
+// дешёвый `MeshLambertMaterial` без металла/глянца/отражений env-map — «только
+// дешёвые материалы». Цвета сохраняются, decor-фейд (`dimBuilding`) работает
+// одинаково (у обоих классов есть `.color`).
 
-function plastic(tint: number): MeshStandardMaterial {
-  return new MeshStandardMaterial({
-    color: tint,
-    metalness: 0,
-    roughness: 0.7,
-  });
+function plastic(tint: number): Material {
+  return quality.active.pbr
+    ? new MeshStandardMaterial({ color: tint, metalness: 0, roughness: 0.7 })
+    : new MeshLambertMaterial({ color: tint });
 }
 /** Корона = цвет категории. Без emissive: иначе per-instance dim/decor её не гасит. */
-function crownMat(category: Category): MeshStandardMaterial {
-  return new MeshStandardMaterial({
-    color: CATEGORY_COLOR[category],
-    metalness: 0,
-    roughness: 0.5,
-  });
+function crownMat(category: Category): Material {
+  const color = CATEGORY_COLOR[category];
+  return quality.active.pbr
+    ? new MeshStandardMaterial({ color, metalness: 0, roughness: 0.5 })
+    : new MeshLambertMaterial({ color });
 }
-/** Глянцевая «стеклянная» панель: почти-чёрная, низкая roughness, ловит env-map. */
-function glass(): MeshPhysicalMaterial {
-  return new MeshPhysicalMaterial({
-    color: GLASS_PANEL_COLOR,
-    metalness: 0,
-    roughness: 0.06,
-    envMapIntensity: 1.5,
-    clearcoat: 1,
-    clearcoatRoughness: 0.06,
-  });
+/** Глянцевая «стеклянная» панель: почти-чёрная, низкая roughness, ловит env-map.
+ *  На минимальном уровне — просто тёмная матовая панель (без глянца/отражений). */
+function glass(): Material {
+  return quality.active.pbr
+    ? new MeshPhysicalMaterial({
+        color: GLASS_PANEL_COLOR,
+        metalness: 0,
+        roughness: 0.06,
+        envMapIntensity: 1.5,
+        clearcoat: 1,
+        clearcoatRoughness: 0.06,
+      })
+    : new MeshLambertMaterial({ color: GLASS_PANEL_COLOR });
 }
-function steel(): MeshStandardMaterial {
-  return new MeshStandardMaterial({
-    color: STEEL_COLOR,
-    metalness: 0.95,
-    roughness: 0.3,
-    envMapIntensity: 1.0,
-  });
+/** Сталь (обвязка/крышки). На минимальном уровне — плоский серый Lambert (без металла). */
+function steel(): Material {
+  return quality.active.pbr
+    ? new MeshStandardMaterial({
+        color: STEEL_COLOR,
+        metalness: 0.95,
+        roughness: 0.3,
+        envMapIntensity: 1.0,
+      })
+    : new MeshLambertMaterial({ color: STEEL_COLOR });
 }
 /**
  * Тёмный оттенок цвета категории — для ДЕТАЛЕЙ короны (полоски, ступени, бугорки),
@@ -141,12 +150,11 @@ function steel(): MeshStandardMaterial {
 function crownDarkColor(category: Category): number {
   return new Color(CATEGORY_COLOR[category]).multiplyScalar(0.42).getHex();
 }
-function crownDarkMat(category: Category): MeshStandardMaterial {
-  return new MeshStandardMaterial({
-    color: crownDarkColor(category),
-    metalness: 0,
-    roughness: 0.55,
-  });
+function crownDarkMat(category: Category): Material {
+  const color = crownDarkColor(category);
+  return quality.active.pbr
+    ? new MeshStandardMaterial({ color, metalness: 0, roughness: 0.55 })
+    : new MeshLambertMaterial({ color });
 }
 /**
  * Светлые графитовые акценты для деталей на ТЁМНОМ корпусе (швы-слои, рёбра): чуть

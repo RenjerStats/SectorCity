@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use jwalk::WalkDir;
+use jwalk::WalkDirGeneric;
 use tokio_util::sync::CancellationToken;
 
 use crate::ipc::contract::{
@@ -460,9 +460,10 @@ pub(crate) fn category_bit(c: Category) -> u8 {
 
 /// Посчитать `cat_mask` для всей арены снизу вверх: файл → собственный бит
 /// категории, папка → объединение масок детей. `parents[i]` — индекс родителя `i`
-/// (или `None` у корня). Обход по убыванию глубины гарантирует, что ребёнок учтён
-/// раньше родителя. Общая точка для свежего скана и загрузки снимка (производное
-/// поле в БД не храним).
+/// (или `None` у корня). Родитель всегда раньше ребёнка в арене (yield-порядок
+/// jwalk для свежего скана; `ORDER BY idx` для снимка) → обратный проход по
+/// индексам гарантирует, что ребёнок учтён раньше родителя. Общая точка для
+/// свежего скана и загрузки снимка (производное поле в БД не храним).
 fn compute_category_masks(nodes: &mut [TreeNode], parents: &[Option<usize>]) {
     for n in nodes.iter_mut() {
         n.cat_mask = if n.is_dir {
@@ -471,9 +472,7 @@ fn compute_category_masks(nodes: &mut [TreeNode], parents: &[Option<usize>]) {
             category_bit(n.category)
         };
     }
-    let mut order: Vec<usize> = (0..nodes.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(nodes[i].depth));
-    for i in order {
+    for i in (0..nodes.len()).rev() {
         let mask = nodes[i].cat_mask;
         if let Some(pi) = parents[i] {
             nodes[pi].cat_mask |= mask;
@@ -539,6 +538,33 @@ fn strip_long_path_prefix(p: &Path) -> PathBuf {
 /// Состояние, протаскиваемое jwalk через обход (счётчик ошибок).
 type WalkState = Arc<AtomicU64>;
 
+/// Метаданные входа, собранные в `process_read_dir` (параллельно, на пуле rayon)
+/// и протащенные в потребителя через `client_state` jwalk. Смысл: дорогой stat
+/// (на Windows — открытие файла по пути) для КАЖДОГО входа выполняется на пуле
+/// параллельно по директориям, а не последовательно в однопоточном цикле-
+/// потребителе — это снимало основной тормоз скана. Раньше вдобавок директории
+/// статились дважды (reparse-проверка + сам цикл); теперь — один stat на вход.
+///
+/// - `fetched && !failed` — метаданные собраны в `process_read_dir`;
+/// - `failed` — stat не удался (уже учтён в счётчике ошибок) → потребитель
+///   пропускает вход, не считая ошибку повторно;
+/// - `!fetched && !failed` — вход не проходил через `process_read_dir` (корень
+///   скана): потребитель дочитает метаданные сам (fallback).
+#[derive(Clone, Copy, Default, Debug)]
+struct EntryMeta {
+    fetched: bool,
+    failed: bool,
+    is_dir: bool,
+    is_reparse: bool,
+    is_system_attr: bool,
+    size: u64,
+    mtime: i64,
+    atime: i64,
+}
+
+/// Тип клиентского состояния jwalk: `ReadDirState = ()`, `DirEntryState = EntryMeta`.
+type WalkClientState = ((), EntryMeta);
+
 /// Просканировать `root` без отмены и без прогресса (удобная обёртка для тестов).
 ///
 /// Возвращает ошибку только если сам корень недоступен; ошибки на отдельных
@@ -570,38 +596,60 @@ pub fn scan_with(
     let walk_root = with_long_path_prefix(root);
     let errors: WalkState = Arc::new(AtomicU64::new(0));
 
-    // `process_read_dir` вызывается для каждой прочитанной директории: тут мы
-    // (1) считаем ошибки чтения детей, (2) гасим спуск в reparse points.
-    let walker = WalkDir::new(&walk_root)
+    // `process_read_dir` вызывается для каждой прочитанной директории на пуле
+    // rayon (параллельно). Тут мы для КАЖДОГО ребёнка читаем метаданные и кладём
+    // их в `client_state` — так дорогой per-entry stat распараллелен, а не висит
+    // в однопоточном цикле-потребителе. Заодно: (1) гасим спуск в reparse points,
+    // (2) считаем метаданные-ошибки один раз (потребитель их не пересчитывает).
+    let walker = WalkDirGeneric::<WalkClientState>::new(&walk_root)
         .skip_hidden(false)
         .follow_links(false)
         .process_read_dir({
             let errors = Arc::clone(&errors);
-            move |_depth, _path, _state, children| {
+            move |_depth, _path, _read_state, children| {
                 for child in children.iter_mut() {
-                    match child {
-                        Ok(entry) => {
+                    let Ok(entry) = child else { continue };
+                    match entry.metadata() {
+                        Ok(meta) => {
+                            let is_dir = meta.is_dir();
+                            let is_reparse = is_reparse_point(&meta);
                             // Не спускаться внутрь reparse points (junction →
                             // циклы). Сам узел остаётся в выдаче.
-                            if entry.file_type().is_dir() {
-                                if let Ok(meta) = entry.metadata() {
-                                    if is_reparse_point(&meta) {
-                                        entry.read_children_path = None;
-                                    }
-                                }
+                            if is_dir && is_reparse {
+                                entry.read_children_path = None;
                             }
+                            let mtime = meta.modified().map(to_unix).unwrap_or(0);
+                            let atime = meta.accessed().map(to_unix).unwrap_or(mtime);
+                            entry.client_state = EntryMeta {
+                                fetched: true,
+                                failed: false,
+                                is_dir,
+                                is_reparse,
+                                is_system_attr: crate::classify::is_system_by_attrs(&meta),
+                                size: if is_dir { 0 } else { meta.len() },
+                                mtime,
+                                atime,
+                            };
                         }
                         Err(_) => {
+                            // Гонки/права: вход останется в выдаче, но потребитель
+                            // его пропустит (failed), не пересчитывая ошибку.
                             errors.fetch_add(1, Ordering::Relaxed);
+                            entry.client_state.failed = true;
                         }
                     }
                 }
             }
         });
 
-    // Пасс 1: собрать узлы в арену, запомнить путь → индекс.
+    // Пасс 1: собрать узлы в арену, связать с родителями по ходу (родитель-
+    // директория уже обработан и лежит в `dir_index` — jwalk отдаёт родителя
+    // раньше детей). Отдельный пасс 2 по сырым путям больше не нужен.
     let mut nodes: Vec<TreeNode> = Vec::new();
-    let mut index: HashMap<PathBuf, usize> = HashMap::new();
+    let mut parents: Vec<Option<usize>> = Vec::new();
+    // Индекс «сырой путь директории → индекс узла». Только директории (они —
+    // единственные возможные родители) → в разы меньше записей, чем полный индекс.
+    let mut dir_index: HashMap<PathBuf, usize> = HashMap::new();
 
     // Счётчики для стрима прогресса (троттлинг по времени).
     let mut bytes_seen: u64 = 0;
@@ -624,23 +672,45 @@ pub fn scan_with(
             }
         };
 
-        let raw_path = entry.path();
-        // Метаданные могут быть недоступны (гонки, права) — пропускаем вход.
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => {
-                errors.fetch_add(1, Ordering::Relaxed);
-                continue;
+        // Метаданные обычно уже собраны в `process_read_dir` (параллельно).
+        // Иначе: `failed` → stat не удался (ошибка уже учтена) → пропускаем;
+        // `!fetched` → вход не проходил через `process_read_dir` (корень) →
+        // дочитываем метаданные здесь (единичный случай).
+        let st = entry.client_state;
+        let (is_dir, is_reparse, is_system_attr, size, mtime, atime) = if st.fetched {
+            (
+                st.is_dir,
+                st.is_reparse,
+                st.is_system_attr,
+                st.size,
+                st.mtime,
+                st.atime,
+            )
+        } else if st.failed {
+            continue;
+        } else {
+            match entry.metadata() {
+                Ok(meta) => {
+                    let is_dir = meta.is_dir();
+                    let mtime = meta.modified().map(to_unix).unwrap_or(0);
+                    (
+                        is_dir,
+                        is_reparse_point(&meta),
+                        crate::classify::is_system_by_attrs(&meta),
+                        // Размер: только у файлов; папки наберут массу при агрегации.
+                        if is_dir { 0 } else { meta.len() },
+                        mtime,
+                        meta.accessed().map(to_unix).unwrap_or(mtime),
+                    )
+                }
+                Err(_) => {
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
             }
         };
 
-        let is_dir = meta.is_dir();
-        let is_reparse = is_reparse_point(&meta);
-        let mtime = meta.modified().map(to_unix).unwrap_or(0);
-        let atime = meta.accessed().map(to_unix).unwrap_or(mtime);
-        // Размер: только у файлов; папки наберут массу при агрегации.
-        let size = if is_dir { 0 } else { meta.len() };
-
+        let raw_path = entry.path();
         let clean_path = strip_long_path_prefix(&raw_path);
         let name = clean_path
             .file_name()
@@ -651,11 +721,16 @@ pub fn scan_with(
         let category = crate::classify::classify(&clean_path, is_dir);
         // Кандидаты на очистку размечает пост-проход `apply_cleanup` ПОСЛЕ сборки
         // дерева (контекст-зависимые правила требуют соседей в арене, план §2.1).
-        let is_locked = crate::classify::is_locked_path(&clean_path, &name)
-            || crate::classify::is_system_by_attrs(&meta);
+        let is_locked = crate::classify::is_locked_path(&clean_path, &name) || is_system_attr;
 
         let depth = entry.depth();
-        index.insert(raw_path.clone(), nodes.len());
+        let idx = nodes.len();
+        // Связка с родителем: родитель-директория уже в `dir_index` (yield-порядок
+        // jwalk — родитель раньше детей). Индекс детей → `parents` для пассов ниже.
+        let parent_idx = dir_index.get(entry.parent_path()).copied();
+        if is_dir {
+            dir_index.insert(raw_path, idx);
+        }
         nodes.push(TreeNode {
             path: clean_path,
             name,
@@ -672,6 +747,10 @@ pub fn scan_with(
             children: Vec::new(),
             depth,
         });
+        parents.push(parent_idx);
+        if let Some(pi) = parent_idx {
+            nodes[pi].children.push(idx);
+        }
 
         // Стрим прогресса с троттлингом, чтобы не топить UI (см. docs §5.4).
         bytes_seen += size;
@@ -709,7 +788,7 @@ pub fn scan_with(
             atime: root_meta.accessed().map(to_unix).unwrap_or(mtime),
             child_count: 0,
             category,
-            // Одиночный корень: эта ветка минует пасс 3 — маску ставим сразу.
+            // Одиночный корень: ветка минует пасс масок — ставим маску сразу.
             cat_mask: if root_meta.is_dir() {
                 0
             } else {
@@ -731,37 +810,16 @@ pub fn scan_with(
         }));
     }
 
-    // Пасс 2: связать детей с родителями по пути (parent всегда уже в индексе).
-    // Работаем с очищенными путями нельзя — индекс по сырым; родитель ребёнка —
-    // это `raw_path.parent()`, но мы храним индекс по сырым путям. Поэтому
-    // повторно пройдём по сырым путям через сам индекс.
-    let mut parents: Vec<Option<usize>> = vec![None; nodes.len()];
-    // Снимем сырые пути из индекса в массив idx → raw_path для родительского
-    // поиска (index хранит raw → idx).
-    let mut raw_paths: Vec<PathBuf> = vec![PathBuf::new(); nodes.len()];
-    for (raw, &idx) in &index {
-        raw_paths[idx] = raw.clone();
-    }
-    for i in 0..nodes.len() {
-        if let Some(parent_raw) = raw_paths[i].parent() {
-            if let Some(&pi) = index.get(parent_raw) {
-                if pi != i {
-                    nodes[pi].children.push(i);
-                    parents[i] = Some(pi);
-                }
-            }
-        }
-    }
+    // Связка детей с родителями уже сделана в пассе 1 (`parents` + `children`);
+    // осталось выставить счётчик прямых детей.
     for n in nodes.iter_mut() {
         n.child_count = n.children.len() as u32;
     }
 
-    // Пасс 3: агрегация размеров снизу вверх. Обрабатываем по убыванию глубины,
-    // чтобы дети были учтены раньше родителя; каждый узел вливает свой размер в
-    // родителя.
-    let mut order: Vec<usize> = (0..nodes.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(nodes[i].depth));
-    for &i in &order {
+    // Пасс 2: агрегация размеров снизу вверх. Родитель всегда раньше ребёнка в
+    // арене (yield-порядок jwalk) → обратный проход по индексам гарантирует, что
+    // ребёнок учтён раньше родителя (сортировка по глубине не нужна).
+    for i in (0..nodes.len()).rev() {
         let size = nodes[i].size;
         if let Some(pi) = parents[i] {
             nodes[pi].size += size;
@@ -782,7 +840,7 @@ pub fn scan_with(
         by_path,
     };
 
-    // Пасс 4: движок правил очистки v2 — пост-проход по готовому дереву (соседи
+    // Пасс 3: движок правил очистки v2 — пост-проход по готовому дереву (соседи
     // уже в арене → контекст-зависимые правила дёшевы, план §2.1).
     crate::classify::apply_cleanup(&mut tree, now);
 

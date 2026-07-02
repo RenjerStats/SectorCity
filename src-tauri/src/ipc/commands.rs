@@ -76,21 +76,24 @@ pub async fn start_scan(
                 cancelled: false,
             };
 
-            // Снимок пишем в blocking-пуле (диск-IO), дерево возвращаем без клона.
+            // Дерево — в стейт и сразу событие `done`: перезапись снимка (диск-IO)
+            // больше НЕ на критическом пути завершения скана. Город строится, как
+            // только дерево в памяти; снимок дописывается в фоне.
+            let tree = std::sync::Arc::new(tree);
+            *state.scan.lock().unwrap() = Some(std::sync::Arc::clone(&tree));
+            let _ = app.emit(SCAN_PROGRESS_EVENT, summary);
+
+            // Фоновая запись снимка: держит собственную `Arc`-ссылку, читателей
+            // (`get_level` и пр.) не блокирует. Задачу не ждём (`start_scan`
+            // возвращается сразу после появления города).
             let db_path = snapshot_db_path(&app);
-            let tree = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 if let Some(db) = db_path {
                     if let Err(e) = snapshot::save(&tree, &db) {
                         tracing::warn!(error = %e, "снимок не сохранён");
                     }
                 }
-                tree
-            })
-            .await
-            .map_err(|e| AppError::Other(format!("задача снимка прервана: {e}")))?;
-
-            *state.scan.lock().unwrap() = Some(tree);
-            let _ = app.emit(SCAN_PROGRESS_EVENT, summary);
+            });
             Ok(true)
         }
         ScanOutcome::Cancelled => {
@@ -283,7 +286,9 @@ pub async fn delete_to_trash(paths: Vec<String>, app: AppHandle) -> AppResult<De
                 Ok(_) => {
                     let mut freed_bytes = 0;
                     if let Some(ref mut tree) = *scan_guard {
-                        if let Some(bytes) = tree.delete_node(&p) {
+                        // `make_mut`: обычно ссылка уникальна (фоновая запись снимка
+                        // после скана давно завершена) → правка на месте без клона.
+                        if let Some(bytes) = std::sync::Arc::make_mut(tree).delete_node(&p) {
                             freed_bytes = bytes;
                         }
                     }

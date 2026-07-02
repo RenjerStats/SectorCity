@@ -61,7 +61,7 @@
     showToast,
     type NodeAction,
   } from "../store/ui";
-  import { restoreLastScan } from "../store/settings";
+  import { restoreLastScan, graphicsLevel } from "../store/settings";
   import type {
     AggSpec,
     Category,
@@ -550,6 +550,20 @@
       scheduleReaggregate();
     });
 
+    // Смена уровня графики (настройки) → живьём применить рендер-параметры (pixelRatio,
+    // разрешение transmission) и пересобрать активный уровень, чтобы материалы (стекло/
+    // металл/PBR) отразили новый уровень. `quality.active` уже обновлён сеттером в сторе.
+    // Первый синхронный вызов пропускаем (стартовый уровень грузится ниже).
+    let graphicsFirst = true;
+    const offGraphics = graphicsLevel.subscribe(() => {
+      if (graphicsFirst) {
+        graphicsFirst = false;
+        return;
+      }
+      handle?.applyQuality();
+      void reaggregate();
+    });
+
     // Команды из header (Scan/Cancel/Reset) — единственный канал «шапка → сцена»
     // (docs §1: миры общаются только через стор). Снимаем команду ДО исполнения,
     // чтобы вложенный subscribe(null) был холостым (гард на `!c`).
@@ -737,6 +751,7 @@
       offShowAgg();
       offHidden();
       offAgg();
+      offGraphics();
       offCleanupGroups();
       offMarks();
       if (aggTimer) clearTimeout(aggTimer);

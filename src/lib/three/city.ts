@@ -72,6 +72,7 @@ import {
 } from "./palette";
 import { makeBuildingDef } from "./buildings";
 import { layoutToWorld, type TreemapRect } from "./layoutToWorld";
+import { quality } from "./quality";
 
 /** Каноническая сторона уровня-владельца (мировые единицы): бо́льшая сторона. */
 export const CITY_SPAN = 200;
@@ -151,9 +152,12 @@ const RING_RIM = 1.0;
 const DOME_AIR = 8; // запас над самым высоким домиком (зазор «застройка↔стекло»)
 const DOME_MIN_HEIGHT = 9; // минимальная высота купола (тощие папки читаемы)
 const DOME_FOOTPRINT_INSET = 0.8; // насколько footprint купола уже плиты района
-/** Скруглённый стеклянный куб: радиус скругления и сегменты на единичном боксе. */
+/** Скруглённый стеклянный куб: радиус скругления на единичном боксе. Число
+ *  сегментов скругления берём из активного уровня графики (`quality.active`). */
 const DOME_ROUND_RADIUS = 0.06;
-const DOME_ROUND_SEGMENTS = 3;
+/** Непрозрачность дешёвого купола (минимальный уровень, без transmission): стекло
+ *  полупрозрачно, чтобы застройка внутри просвечивала (нет «мороза»-преломления). */
+const CHEAP_DOME_OPACITY = 0.3;
 /**
  * Анимация снятия купола при drill (и обратного «надевания» при up, §II.3.6):
  * купол раскрываемого района уезжает вверх ЗА ВЕСЬ отрезок зума (`extractDome`), но
@@ -725,36 +729,74 @@ function modeColorInto(
   return out;
 }
 
-/** Единичный скруглённый куб купола — общий для инстанс-меша и анимируемых «роёв». */
-function makeDomeGeometry(): RoundedBoxGeometry {
+/** Единичный скруглённый куб купола — общий для инстанс-меша и анимируемых «роёв».
+ *  Число сегментов скругления — из активного уровня графики. */
+function makeRoundedUnitCube(): RoundedBoxGeometry {
   return new RoundedBoxGeometry(
     1,
     1,
     1,
-    DOME_ROUND_SEGMENTS,
+    quality.active.roundSegments,
     DOME_ROUND_RADIUS,
   );
 }
 
+/** Единичный скруглённый куб купола — общий для инстанс-меша и анимируемых «роёв». */
+function makeDomeGeometry(): RoundedBoxGeometry {
+  return makeRoundedUnitCube();
+}
+
 /**
- * Материал стеклянного купола (§II.3.7): настоящее матовое стекло (`transmission` +
- * `roughness` морозят прошедший свет; требует env-map, см. `scene.ts`). `flight=false`
- * — для общего `domeMesh` (depthWrite:true решает купол-vs-купол пофрагментно, цвет
- * per-instance). `flight=true` — для анимируемого «снятого» купола: полупрозрачный,
- * НЕ пишет глубину (уезжает над застройкой), цвет стекла фиксирован (не per-instance).
+ * Материал стеклянного купола. На `frostedGlass=true` (оптимальный/максимальный) —
+ * настоящее матовое стекло (§II.3.7): `transmission` + `roughness` морозят прошедший
+ * свет (требует env-map, см. `scene.ts`); `flight=false` даёт `depthWrite:true`
+ * (купол-vs-купол пофрагментно), цвет per-instance. На `frostedGlass=false`
+ * (минимальный) — ДЕШЁВАЯ полупрозрачность (`MeshLambertMaterial` + opacity), без
+ * второго прохода transmission: застройка просто просвечивает сквозь стекло.
+ *
+ * Возвращаемый тип — объединение: оба класса несут `.color`/`.opacity`, чего
+ * достаточно вызывающим (`applyDomeProgress`, decor-dim, per-instance тинт).
  */
-function makeDomeMaterial(flight: boolean): MeshPhysicalMaterial {
-  const mat = new MeshPhysicalMaterial({
-    metalness: 0,
-    roughness: GLASS_ROUGHNESS,
-    transmission: 1,
-    thickness: 6,
-    ior: 1.45,
+function makeDomeMaterial(
+  flight: boolean,
+): MeshPhysicalMaterial | MeshLambertMaterial {
+  if (quality.active.frostedGlass) {
+    const mat = new MeshPhysicalMaterial({
+      metalness: 0,
+      roughness: GLASS_ROUGHNESS,
+      transmission: 1,
+      thickness: 6,
+      ior: 1.45,
+      transparent: true,
+      depthWrite: !flight,
+    });
+    if (flight) mat.color.set(GLASS_COLOR);
+    return mat;
+  }
+  // Дешёвое «стекло»: полупрозрачный Lambert, без transmission (нет второго прохода
+  // сцены). depthWrite:false — прозрачный меш не режет глубину; порядок купол-vs-
+  // купол не разрешается пофрагментно (мелкие артефакты допустимы на этом уровне).
+  const mat = new MeshLambertMaterial({
     transparent: true,
-    depthWrite: !flight,
+    opacity: CHEAP_DOME_OPACITY,
+    depthWrite: false,
   });
   if (flight) mat.color.set(GLASS_COLOR);
   return mat;
+}
+
+/**
+ * Материал плиты-постамента папки. На PBR — металл (+1/+2) либо матовый PBR (+3),
+ * читаемые за счёт отражений env-map. На минимальном уровне — дешёвый Lambert без
+ * металла (per-instance цвет-район сохраняется). `metal` различает +1/+2 vs +3.
+ */
+function makeBaseMaterial(
+  metal: boolean,
+): MeshStandardMaterial | MeshLambertMaterial {
+  if (!quality.active.pbr) return new MeshLambertMaterial();
+  return metal
+    ? new MeshStandardMaterial({ metalness: 0.9, roughness: 0.35 })
+    : new MeshStandardMaterial({ metalness: 0, roughness: 0.6 });
 }
 
 /**
@@ -766,7 +808,7 @@ function makeDomeMaterial(flight: boolean): MeshPhysicalMaterial {
  */
 function applyDomeProgress(
   mesh: Mesh,
-  mat: MeshPhysicalMaterial,
+  mat: MeshPhysicalMaterial | MeshLambertMaterial,
   baseY: number,
   liftBy: number,
   prog: number,
@@ -996,16 +1038,17 @@ export function buildLevel(
     );
     domeMesh.renderOrder = 2; // после непрозрачных (здания/плиты)
     // Плита-постамент: тот же скруглённый куб, что и купол (совпадение кривизны
-    // углов). Металл (+1/+2) виден за счёт отражений env-map (см. scene.ts).
+    // углов). Металл (+1/+2) виден за счёт отражений env-map (см. scene.ts); на
+    // минимальном уровне — дешёвый матовый Lambert (см. makeBaseMaterial).
     baseMesh = new InstancedMesh(
-      new RoundedBoxGeometry(1, 1, 1, DOME_ROUND_SEGMENTS, DOME_ROUND_RADIUS),
-      new MeshStandardMaterial({ metalness: 0.9, roughness: 0.35 }),
+      makeRoundedUnitCube(),
+      makeBaseMaterial(true),
       districts.length,
     );
     // Матовая плита вложенных папок +3 (без металлики) — глубинная детализация.
     baseMatteMesh = new InstancedMesh(
-      new RoundedBoxGeometry(1, 1, 1, DOME_ROUND_SEGMENTS, DOME_ROUND_RADIUS),
-      new MeshStandardMaterial({ metalness: 0, roughness: 0.6 }),
+      makeRoundedUnitCube(),
+      makeBaseMaterial(false),
       districts.length,
     );
 

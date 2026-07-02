@@ -6,6 +6,7 @@
 
 mod classify;
 mod error;
+mod gpu;
 mod ipc;
 mod scan;
 mod state;
@@ -44,6 +45,10 @@ pub fn run() {
             ipc::commands::delete_to_trash,
         ])
         .setup(|app| {
+            // Форс дискретной GPU (запись предпочтения в реестр) — в фоне, чтобы
+            // reg.exe не задерживал показ окна. Идемпотентно, ошибки не фатальны.
+            std::thread::spawn(gpu::ensure_high_performance_gpu);
+
             // Переоткрытие без рескана: если снимок есть — поднимаем его в стейт.
             // Чтение SQLite уносим в blocking-пул (план §1.1): на большом снимке
             // синхронная загрузка здесь держала показ окна. Пока фон читает, флаг
@@ -65,7 +70,8 @@ pub fn run() {
                                     elapsed_ms = t0.elapsed().as_millis() as u64,
                                     "снимок загружен"
                                 );
-                                *handle.state::<AppState>().scan.lock().unwrap() = Some(tree);
+                                *handle.state::<AppState>().scan.lock().unwrap() =
+                                    Some(std::sync::Arc::new(tree));
                             }
                             Err(e) => tracing::warn!(error = %e, "снимок не загружен"),
                         }
