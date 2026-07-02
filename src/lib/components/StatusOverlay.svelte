@@ -1,5 +1,13 @@
 <script lang="ts">
-  type StatusKind = "welcome" | "empty" | "error" | "cancelled" | "none";
+  import StarGlyph from "./StarGlyph.svelte";
+
+  type StatusKind =
+    | "loading"
+    | "welcome"
+    | "empty"
+    | "error"
+    | "cancelled"
+    | "none";
 
   let {
     kind,
@@ -14,10 +22,18 @@
   } = $props();
 </script>
 
-{#if kind !== "none" && (kind === "welcome" || kind === "empty" || kind === "error" || kind === "cancelled")}
+{#if kind !== "none"}
   <div class="overlay-container">
     <div class="status-card">
-      {#if kind === "welcome"}
+      <!-- Бренд-глиф «полярная звезда» из точек (план §6): пульсирует, пока
+           что-то грузится; в остальных состояниях — статичная марка. -->
+      <StarGlyph size={40} pulse={kind === "loading"} />
+      {#if kind === "loading"}
+        <h2 class="title">Загружаю снимок…</h2>
+        <p class="description">
+          Читаю снимок прошлого сканирования — город появится без рескана.
+        </p>
+      {:else if kind === "welcome"}
         <h2 class="title accent">SECTORCITY</h2>
         <p class="description">
           Инструмент анализа дискового пространства.<br />Здание — файл, район —

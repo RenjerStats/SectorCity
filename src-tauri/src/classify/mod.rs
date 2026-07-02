@@ -1,12 +1,15 @@
-//! Классификатор (правила, без ИИ): категория файла по расширению и пометка
-//! кэш/мусор-папок. Данные-таблицы — в `data.rs` (контент-тикет 001), логика —
-//! здесь.
+//! Классификатор (правила, без ИИ): категория файла по расширению и движок
+//! правил очистки v2 (`rules.rs`, пост-проход по дереву). Данные-таблицы — в
+//! `data.rs` (контент-тикет 001), логика — здесь и в `rules.rs`.
 //!
 //! Цвет здания = категория содержимого (см. ТЗ §2). Категория присваивается
 //! по расширению; неизвестное → `Other`. Папки сами по себе категории не несут
-//! (`Other`), но известные кэш-каталоги помечаются кандидатами на очистку.
+//! (`Other`); кандидаты на очистку размечает `rules::apply_cleanup`.
 
 mod data;
+mod rules;
+
+pub use rules::{apply_cleanup, confidence_of};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,13 +39,6 @@ pub fn classify(path: &Path, is_dir: bool) -> Category {
         }
         None => Category::Other,
     }
-}
-
-/// Имя каталога — известный кэш/мусор (кандидат на очистку)?
-/// Сравнение по точному совпадению имени в нижнем регистре.
-pub fn is_cleanup_dir(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    data::CLEANUP_DIR_NAMES.iter().any(|&n| n == lower)
 }
 
 /// Порог «крупного» файла для эвристики очистки (байты).
@@ -128,14 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_cleanup_dirs() {
-        assert!(is_cleanup_dir("node_modules"));
-        assert!(is_cleanup_dir("Node_Modules"));
-        assert!(is_cleanup_dir("__pycache__"));
-        assert!(!is_cleanup_dir("src"));
-    }
-
-    #[test]
     fn stale_large_file_heuristic() {
         let now = 1_000_000_000;
         let big = STALE_LARGE_MIN_SIZE;
@@ -146,15 +134,6 @@ mod tests {
         assert!(!is_stale_large_file(big, now, now));
         // Старый, но мелкий → нет.
         assert!(!is_stale_large_file(1024, old, now));
-    }
-
-    #[test]
-    fn detects_recycle_bin() {
-        // Корзина Windows в корне диска — точное имя с учётом регистра.
-        assert!(is_cleanup_dir("$Recycle.Bin"));
-        assert!(is_cleanup_dir("$RECYCLE.BIN"));
-        assert!(is_cleanup_dir(".Trash"));
-        assert!(!is_cleanup_dir("Recycle"));
     }
 
     #[test]

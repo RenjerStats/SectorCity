@@ -1,18 +1,25 @@
 <script lang="ts">
   /**
-   * Панель режима «Сканер мусора» в footer (vision §I.7, шаг 2/4). Показывает
-   * причину(ы) очистки со счётчиком/объёмом и массовую пометку, плюс настройки
-   * размера и давности для фильтрации кандидатов.
+   * Панель режима «Сканер мусора» v2 в footer (план §2.3, vision §I.7 шаг 2):
+   * список ПРИЧИН по всему поддереву текущего уровня (чекбокс-чип · глиф
+   * уверенности · счётчик · объём), отсортированный по объёму (сортирует бэк).
+   * Клик по чипу — массовая пометка/снятие всей причины (полный список путей
+   * приходит лениво через `cleanup_paths`). Пресеты размера/давности остаются
+   * фильтрами: применяются к пометке Review-причин и к подсветке сцены.
    */
   import {
-    cleanupCandidatesHere,
+    cleanupGroups,
     markedForCleanup,
     markMany,
     unmarkMany,
     candidateFilter,
     filterActive,
+    currentLevel,
   } from "../store/mode";
+  import { cleanupPaths } from "../ipc/commands";
+  import { REASON_META, CONFIDENCE_META } from "../cleanup";
   import { formatSize } from "../format";
+  import type { CleanupGroup, CleanupItemRef } from "../ipc/contract";
 
   const GB = 1024 ** 3;
   const MB = 1024 ** 2;
@@ -30,29 +37,51 @@
 
   let f = $derived($candidateFilter);
   let marks = $derived($markedForCleanup);
+  let groups = $derived($cleanupGroups);
 
-  // Кандидаты, отфильтрованные по размеру и давности
-  let candidates = $derived(
-    $cleanupCandidatesHere.filter((n) => {
-      if (f.minSize > 0 && n.size < f.minSize) return false;
-      if (f.olderThanDays > 0) {
-        const olderThan = f.olderThanDays * 86400;
-        if (Date.now() / 1000 - n.mtime < olderThan) return false;
+  // Какие причины помечены целиком (кликом по чипу) — для облика чипа. Локальное
+  // приближение: точная сверка потребовала бы полного списка путей на клиенте.
+  // Чип «подсвечен», если все его топ-элементы в пометке (дёшево и наглядно).
+  function isReasonMarked(g: CleanupGroup): boolean {
+    return g.topItems.length > 0 && g.topItems.every((n) => marks.has(n.path));
+  }
+
+  /** Фильтр пресетов размера/давности — применяется к пометке Review-причин
+   *  (Safe/Likely помечаются целиком: правило уже даёт уверенность). */
+  function passesPresets(item: CleanupItemRef): boolean {
+    if (f.minSize > 0 && item.size < f.minSize) return false;
+    if (f.olderThanDays > 0) {
+      const olderThan = f.olderThanDays * 86400;
+      if (Date.now() / 1000 - item.mtime < olderThan) return false;
+    }
+    return true;
+  }
+
+  let busyReason = $state<string | null>(null);
+
+  /** Клик по чипу причины: пометить всю причину (или снять, если помечена). */
+  async function toggleReason(g: CleanupGroup) {
+    const scope = $currentLevel;
+    if (!scope || busyReason) return;
+    busyReason = g.reason;
+    try {
+      let items = await cleanupPaths(scope, g.reason);
+      if (g.confidence === "review") items = items.filter(passesPresets);
+      if (isReasonMarked(g)) {
+        unmarkMany(items.map((i) => i.path));
+      } else {
+        markMany(items);
       }
-      return true;
-    }),
-  );
+    } catch (err) {
+      console.warn("cleanup_paths не удался:", err);
+    } finally {
+      busyReason = null;
+    }
+  }
 
-  // Суммарный объём кандидатов этого уровня (для строки причины).
-  let candBytes = $derived(candidates.reduce((s, n) => s + n.size, 0));
-  // Все ли кандидаты уровня уже помечены (тогда кнопка снимает, а не ставит).
-  let allMarked = $derived(
-    candidates.length > 0 && candidates.every((n) => marks.has(n.path)),
-  );
-
-  function toggleAll() {
-    if (allMarked) unmarkMany(candidates.map((n) => n.path));
-    else markMany(candidates);
+  function chipTitle(g: CleanupGroup): string {
+    const conf = CONFIDENCE_META[g.confidence];
+    return `${REASON_META[g.reason].explain}\n\nУверенность: ${conf.label} — ${conf.hint}`;
   }
 
   function setMinSize(v: number) {
@@ -62,35 +91,40 @@
     candidateFilter.set({ ...f, olderThanDays: v });
   }
   function resetFilters() {
-    candidateFilter.set({
-      ...f,
-      minSize: 0,
-      olderThanDays: 0,
-    });
+    candidateFilter.set({ ...f, minSize: 0, olderThanDays: 0 });
   }
 </script>
 
 <div class="cleanup">
-  <span class="cap">ПРИЧИНА</span>
+  <span class="cap">ПРИЧИНЫ</span>
 
-  <div class="reason">
-    <span class="dot" aria-hidden="true"></span>
-    <span class="reason-label">Кандидаты на очистку</span>
-    <span class="reason-hint">кэш · корзина · крупные старые</span>
-    <span class="reason-count">
-      {candidates.length}
-      {#if candidates.length > 0}· {formatSize(candBytes)}{/if}
-    </span>
-    <button
-      class="mark-all"
-      disabled={candidates.length === 0}
-      onclick={toggleAll}
-    >
-      {allMarked ? "Снять все" : "Отметить все"}
-    </button>
-  </div>
+  {#if groups.length === 0}
+    <span class="hint">Кандидатов в этом поддереве не найдено</span>
+  {:else}
+    <div class="chips" role="list">
+      {#each groups as g (g.reason)}
+        <button
+          class="chip"
+          class:on={isReasonMarked(g)}
+          disabled={busyReason !== null}
+          title={chipTitle(g)}
+          onclick={() => void toggleReason(g)}
+        >
+          <span
+            class="dot"
+            style:background={CONFIDENCE_META[g.confidence].cssVar}
+            aria-hidden="true"
+          ></span>
+          <span class="chip-label">{REASON_META[g.reason].label}</span>
+          <span class="chip-count">
+            {g.count.toLocaleString("ru")} · {formatSize(g.bytes)}
+          </span>
+        </button>
+      {/each}
+    </div>
+  {/if}
 
-  <span class="hint">Клик по зданию — пометить на снос</span>
+  <span class="hint gesture">Ctrl+клик по зданию — пометить на снос</span>
 
   <span class="spacer"></span>
 
@@ -148,35 +182,22 @@
     white-space: nowrap;
   }
 
-  .reason {
+  /* Лента чипов-причин: горизонтальный скролл при переполнении (footer — одна
+     строка фиксированной высоты, вертикали нет). */
+  .chips {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    padding: 2px 0;
+  }
+  .chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.5rem;
-    white-space: nowrap;
-  }
-  .dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 8px var(--accent-soft);
+    gap: 0.4rem;
     flex-shrink: 0;
-  }
-  .reason-label {
-    color: var(--text);
-    font-size: 0.8rem;
-    font-weight: 600;
-  }
-  .reason-hint {
-    color: var(--text-muted);
-    font-size: 0.72rem;
-  }
-  .reason-count {
-    color: var(--text-2);
-    font-size: 0.76rem;
-    font-variant-numeric: tabular-nums;
-  }
-  .mark-all {
     font: inherit;
     font-size: 0.74rem;
     color: var(--text);
@@ -189,20 +210,45 @@
       background var(--motion-micro) var(--ease-out),
       border-color var(--motion-micro) var(--ease-out);
   }
-  .mark-all:hover:not(:disabled) {
+  .chip:hover:not(:disabled) {
     border-color: var(--accent);
-    color: var(--accent);
+  }
+  .chip.on {
+    border-color: var(--accent);
     background: var(--accent-soft);
   }
-  .mark-all:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
+  .chip:disabled {
+    opacity: 0.6;
+    cursor: wait;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .chip-label {
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .chip-count {
+    color: var(--text-2);
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   .hint {
     font-size: 0.72rem;
     color: var(--text-muted);
     white-space: nowrap;
+  }
+  /* Подсказка жеста прячется первой, когда чипам тесно. */
+  .hint.gesture {
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
   .spacer {
     flex: 1 1 auto;

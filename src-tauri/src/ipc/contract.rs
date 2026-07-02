@@ -36,6 +36,88 @@ pub enum NodeFlag {
     Aggregated,
 }
 
+/// Причина, по которой узел признан кандидатом на очистку (движок правил v2,
+/// план §2.1 / vision §I.7.1). Определяет уверенность и текст-объяснение.
+/// ВАЖНО: зеркало TS-типа `CleanupReason` (src/lib/ipc/contract.ts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CleanupReason {
+    /// Кэш пакетного менеджера (node_modules при package.json, pip/npm/nuget/gradle).
+    PackageCache,
+    /// Артефакты сборки (target при Cargo.toml, build/dist/out при маркере проекта).
+    BuildArtifact,
+    /// Кэш браузера (…\Cache / Code Cache под профилем известного браузера).
+    BrowserCache,
+    /// Кэш шейдеров/GPU (DXCache, GLCache, ShaderCache).
+    GpuCache,
+    /// Известная папка времянок (AppData\Local\Temp, Windows\Temp).
+    TempDir,
+    /// Файл-времянка по расширению (.tmp/.bak/.old/~*).
+    TempFile,
+    /// Прерванная загрузка (.crdownload/.part/.download).
+    InterruptedDownload,
+    /// Дамп падения (.dmp, папка CrashDumps).
+    CrashDump,
+    /// Корзина ОС ($Recycle.Bin, .Trash).
+    RecycleBin,
+    /// Windows.old — прошлая установка Windows.
+    WindowsOld,
+    /// Установщик, залежавшийся в «Загрузках» (.exe/.msi в Downloads).
+    InstallerInDownloads,
+    /// Пустая папка.
+    EmptyDir,
+    /// Крупный и давно не тронутый файл (эвристика, строго Review).
+    StaleLarge,
+}
+
+/// Уверенность правила: `Safe` — можно сносить смело, `Likely` — почти наверняка
+/// мусор, `Review` — требует взгляда пользователя.
+/// ВАЖНО: зеркало TS-типа `Confidence` (src/lib/ipc/contract.ts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    Safe,
+    Likely,
+    Review,
+}
+
+/// Тройка «правило → уверенность» на узле-кандидате. Сериализуется только когда
+/// есть (`Option` на `ScanNode`) — payload не раздувается.
+/// ВАЖНО: зеркало TS-типа `CleanupInfo` (src/lib/ipc/contract.ts).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupInfo {
+    pub reason: CleanupReason,
+    pub confidence: Confidence,
+}
+
+/// Группа кандидатов одной причины по поддереву — ответ `list_cleanup`.
+/// ВАЖНО: зеркало TS-типа `CleanupGroup` (src/lib/ipc/contract.ts).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupGroup {
+    pub reason: CleanupReason,
+    pub confidence: Confidence,
+    /// Число кандидатов причины в поддереве (вложенные не задваиваются).
+    pub count: u64,
+    /// Суммарный объём кандидатов причины (байты).
+    pub bytes: u64,
+    /// Крупнейшие N кандидатов причины (для списка в панели); остальные — лениво
+    /// через `cleanup_paths`.
+    pub top_items: Vec<ScanNode>,
+}
+
+/// Лёгкая ссылка на кандидата (для массовой пометки причины целиком).
+/// ВАЖНО: зеркало TS-типа `CleanupItemRef` (src/lib/ipc/contract.ts).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupItemRef {
+    pub path: String,
+    pub size: u64,
+    /// Время модификации (unix-секунды) — для фильтра давности при пометке.
+    pub mtime: i64,
+}
+
 /// Параметры агрегации «Прочее», приходят от UI в `get_level`.
 /// ВАЖНО: зеркало TS-типа `AggSpec` (src/lib/ipc/contract.ts).
 ///
@@ -104,12 +186,30 @@ pub struct ScanNode {
     /// по заведомо пустым районам).
     pub category_mask: u8,
     pub flags: Vec<NodeFlag>,
+    /// Кандидатура на очистку: (причина, уверенность). `None` — не кандидат;
+    /// не сериализуется, когда пусто (payload не раздувается). Флаг
+    /// `CleanupCandidate` в `flags` дублируется для обратной совместимости фронта.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<CleanupInfo>,
     /// Превью детей (вложенный treemap, +1 уровень). Заполняется ТОЛЬКО при
     /// `get_level(depth > 1)` и только для папок (рекурсивно при `depth > 2`);
     /// иначе пусто. Пустой вектор не сериализуется — payload не раздувается
     /// на листьях и при `depth = 1` (см. docs §5.7, IPC «текущий уровень + превью»).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ScanNode>,
+}
+
+/// Ответ `current_root`: корень текущего дерева с учётом фоновой загрузки снимка.
+/// ВАЖНО: зеркало TS-типа `CurrentRoot` (src/lib/ipc/contract.ts).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentRoot {
+    /// Снимок ещё читается из SQLite в фоне: корня пока нет, но он МОЖЕТ появиться —
+    /// фронт ждёт события `snapshot://ready`, а не стартует на демо-городе.
+    pub loading: bool,
+    /// Корень дерева (загруженного снимка или последнего скана); `None`, если
+    /// дерева нет (и не будет, когда `loading == false`).
+    pub root: Option<String>,
 }
 
 /// Результат удаления помеченных файлов в Корзину.

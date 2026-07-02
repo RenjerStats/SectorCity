@@ -1,7 +1,7 @@
-//! Данные классификатора: расширение → категория и паттерны кэш-папок.
+//! Данные классификатора: расширение → категория и таблицы правил очистки v2.
 //! Сгенерировано как контент-таблица (тикет 001). Только данные, без логики.
 
-use crate::ipc::contract::Category;
+use crate::ipc::contract::{Category, CleanupReason};
 
 /// Пары (расширение_без_точки_в_нижнем_регистре, категория).
 /// Отсортировано по категории, внутри — по алфавиту. Без дубликатов расширений.
@@ -190,30 +190,174 @@ pub const EXTENSION_CATEGORY: &[(&str, Category)] = &[
     ("wmv", Category::Video),
 ];
 
-/// Имена каталогов, которые обычно являются кэшем/мусором (кандидаты на очистку).
-/// Имена сравниваются по точному совпадению имени каталога в нижнем регистре.
-pub const CLEANUP_DIR_NAMES: &[&str] = &[
+/* ─────────────────────────── правила очистки v2 ────────────────────────────
+ * План §2 / vision §I.7.1. Здесь только данные; движок — classify/rules.rs.
+ * Все имена/компоненты — в нижнем регистре, движок сравнивает case-insensitive.
+ */
+
+/// Имена каталогов-мусора, ОДНОЗНАЧНЫЕ без контекста (точный матч имени).
+/// Голые `build`/`dist`/`out`/`temp`/`tmp` сюда НЕ входят (ложные срабатывания) —
+/// они контекст-зависимые, см. [`CONTEXT_DIR_RULES`] и известные пути.
+pub const UNAMBIGUOUS_DIR_NAMES: &[(&str, CleanupReason)] = &[
     // Корзины ОС (в корне каждого диска Windows; `.trash` — задел под *nix).
-    // Подпапки с UID (`.trash-1000`) пока не ловим — нужен префиксный матч.
-    "$recycle.bin",
-    ".cache",
-    ".gradle",
-    ".idea",
-    ".ipynb_checkpoints",
-    ".pytest_cache",
-    ".sass-cache",
-    ".trash",
-    ".turbo",
-    ".venv",
-    ".vs",
-    "__pycache__",
-    "bower_components",
-    "build",
-    "dist",
-    "node_modules",
-    "out",
-    "target",
-    "temp",
-    "tmp",
-    "venv",
+    ("$recycle.bin", CleanupReason::RecycleBin),
+    (".trash", CleanupReason::RecycleBin),
+    // Прошлая установка Windows.
+    ("windows.old", CleanupReason::WindowsOld),
+    // Кэши инструментов, узнаваемые по одному имени.
+    ("__pycache__", CleanupReason::BuildArtifact),
+    (".pytest_cache", CleanupReason::BuildArtifact),
+    (".sass-cache", CleanupReason::BuildArtifact),
+    (".turbo", CleanupReason::BuildArtifact),
+    (".ipynb_checkpoints", CleanupReason::BuildArtifact),
+    (".vs", CleanupReason::BuildArtifact),
+    ("bower_components", CleanupReason::PackageCache),
+    // Кэши GPU/шейдеров (профили драйверов и приложений).
+    ("dxcache", CleanupReason::GpuCache),
+    ("glcache", CleanupReason::GpuCache),
+    ("shadercache", CleanupReason::GpuCache),
+    ("d3dscache", CleanupReason::GpuCache),
+    ("nv_cache", CleanupReason::GpuCache),
+    // Дампы падений Windows (%LOCALAPPDATA%\CrashDumps).
+    ("crashdumps", CleanupReason::CrashDump),
 ];
+
+/// Известные пути: путь узла ЗАКАНЧИВАЕТСЯ этой последовательностью компонентов.
+pub const PATH_SUFFIX_RULES: &[(&[&str], CleanupReason)] = &[
+    (&["appdata", "local", "temp"], CleanupReason::TempDir),
+    (&["windows", "temp"], CleanupReason::TempDir),
+    (
+        &["appdata", "local", "pip", "cache"],
+        CleanupReason::PackageCache,
+    ),
+    (
+        &["appdata", "local", "npm-cache"],
+        CleanupReason::PackageCache,
+    ),
+    (
+        &["appdata", "local", "yarn", "cache"],
+        CleanupReason::PackageCache,
+    ),
+    (&[".nuget", "packages"], CleanupReason::PackageCache),
+    (&[".gradle", "caches"], CleanupReason::PackageCache),
+];
+
+/// Имена кэш-папок браузеров: срабатывают ТОЛЬКО при компоненте-вендоре в пути
+/// (см. [`BROWSER_VENDOR_COMPONENTS`]) — голое `cache` где угодно не считается.
+pub const BROWSER_CACHE_DIR_NAMES: &[&str] = &[
+    "cache",
+    "code cache",
+    "gpucache",
+    "cache_data",
+    "cachestorage",
+    "media cache",
+    "cache2", // Firefox
+];
+
+/// Компоненты пути, указывающие на профиль браузера.
+pub const BROWSER_VENDOR_COMPONENTS: &[&str] = &[
+    "mozilla",
+    "firefox",
+    "google",
+    "chrome",
+    "chromium",
+    "microsoft",
+    "edge",
+    "opera",
+    "opera software",
+    "bravesoftware",
+    "vivaldi",
+    "yandex",
+    "yandexbrowser",
+];
+
+/// Контекст-зависимое правило: папка `name` — кандидат, только если среди её
+/// СОСЕДЕЙ (детей родителя) есть маркер проекта. Маркер `*.ext` — по суффиксу.
+pub struct ContextDirRule {
+    pub name: &'static str,
+    pub reason: CleanupReason,
+    pub markers: &'static [&'static str],
+}
+
+/// Маркеры «рядом проект» для generic-папок сборки (build/dist/out).
+pub const PROJECT_MARKERS: &[&str] = &[
+    "package.json",
+    "cmakelists.txt",
+    "*.sln",
+    "*.csproj",
+    "pyproject.toml",
+    "makefile",
+    "cargo.toml",
+    "build.gradle",
+    "build.gradle.kts",
+];
+
+/// Маркеры python-проекта (для venv).
+pub const PY_MARKERS: &[&str] = &["pyproject.toml", "requirements.txt", "setup.py"];
+
+/// Контекст-зависимые папки (главное отличие v2 от v1).
+pub const CONTEXT_DIR_RULES: &[ContextDirRule] = &[
+    ContextDirRule {
+        name: "node_modules",
+        reason: CleanupReason::PackageCache,
+        markers: &["package.json"],
+    },
+    ContextDirRule {
+        name: "target",
+        reason: CleanupReason::BuildArtifact,
+        markers: &["cargo.toml"],
+    },
+    ContextDirRule {
+        name: "build",
+        reason: CleanupReason::BuildArtifact,
+        markers: PROJECT_MARKERS,
+    },
+    ContextDirRule {
+        name: "dist",
+        reason: CleanupReason::BuildArtifact,
+        markers: PROJECT_MARKERS,
+    },
+    ContextDirRule {
+        name: "out",
+        reason: CleanupReason::BuildArtifact,
+        markers: PROJECT_MARKERS,
+    },
+    ContextDirRule {
+        name: ".venv",
+        reason: CleanupReason::PackageCache,
+        markers: PY_MARKERS,
+    },
+    ContextDirRule {
+        name: "venv",
+        reason: CleanupReason::PackageCache,
+        markers: PY_MARKERS,
+    },
+    ContextDirRule {
+        name: ".gradle",
+        reason: CleanupReason::BuildArtifact,
+        markers: &[
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ],
+    },
+];
+
+/// Расширения-времянки: (расширение_без_точки, причина).
+pub const TEMP_FILE_EXTENSIONS: &[(&str, CleanupReason)] = &[
+    ("tmp", CleanupReason::TempFile),
+    ("temp", CleanupReason::TempFile),
+    ("bak", CleanupReason::TempFile),
+    ("old", CleanupReason::TempFile),
+    ("dmp", CleanupReason::CrashDump),
+    ("crdownload", CleanupReason::InterruptedDownload),
+    ("part", CleanupReason::InterruptedDownload),
+    ("download", CleanupReason::InterruptedDownload),
+];
+
+/// Расширения установщиков (для правила «установщик в Загрузках»; Windows-first).
+pub const INSTALLER_EXTENSIONS: &[&str] = &["exe", "msi", "msix", "appx"];
+
+/// Имена папки «Загрузки» (нижний регистр).
+pub const DOWNLOADS_DIR_NAMES: &[&str] = &["downloads", "загрузки"];

@@ -164,6 +164,13 @@ pub fn mock_level(root: &str) -> Vec<ScanNode> {
                 // узла — демо-фильтр по категориям тогда работает и до скана.
                 category_mask: crate::scan::category_bit(spec.category),
                 flags,
+                // Мок-кандидаты несут условную причину (демо панели причин).
+                cleanup: spec
+                    .is_cleanup
+                    .then_some(crate::ipc::contract::CleanupInfo {
+                        reason: crate::ipc::contract::CleanupReason::StaleLarge,
+                        confidence: crate::ipc::contract::Confidence::Review,
+                    }),
                 // Мок плоский: реальные дети (и превью depth>1) придут со сканером.
                 children: Vec::new(),
             }

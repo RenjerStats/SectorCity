@@ -18,6 +18,7 @@
   import { settingsOpen, toggleSettings } from "../store/settings";
   import { formatSize } from "../format";
   import SearchBox from "./SearchBox.svelte";
+  import Icon from "./Icon.svelte";
 
   let busy = $derived($appMode.kind === "scanning");
   let cleanup = $derived($appMode.kind === "cleanup");
@@ -33,32 +34,9 @@
 
 <header class="header">
   <div class="region brand">
-    <button
-      class="settings-btn"
-      class:on={settings}
-      aria-pressed={settings}
-      aria-label="Настройки"
-      onclick={toggleSettings}
-    >
-      <svg
-        class="gear"
-        viewBox="0 0 24 24"
-        width="16"
-        height="16"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.8"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <circle cx="12" cy="12" r="3.2" />
-        <path
-          d="M12 2.2v2.6M12 19.2v2.6M2.2 12h2.6M19.2 12h2.6M4.9 4.9l1.9 1.9M17.2 17.2l1.9 1.9M19.1 4.9l-1.9 1.9M6.8 17.2l-1.9 1.9"
-        />
-      </svg>
-      <span class="settings-label">Настройки</span>
-    </button>
+    <!-- Бренд-слот (vision §I.11): только dot-matrix wordmark (крупно — точки
+         должны читаться); шестерёнка уехала в правый кластер действий. -->
+    <span class="wordmark" aria-label="SectorCity">SECTORCITY</span>
     {#if cleanup}
       <span class="chip-cleanup">СКАНЕР МУСОРА</span>
     {/if}
@@ -101,25 +79,41 @@
       >
         Сканер мусора
       </button>
+      <!-- Вторичные действия — иконки-кнопки с тултипами (план §4: правый
+           кластер был перегружен пятью текстовыми кнопками одного веса). -->
       {#if hiddenCount > 0}
         <button
-          class="btn"
+          class="btn icon-btn"
+          title="Показать скрытое ({hiddenCount})"
+          aria-label="Показать скрытое ({hiddenCount})"
           onclick={() => dispatchCommand({ kind: "toggleHidden" })}
         >
-          Показать скрытое ({hiddenCount})
+          <Icon name="eye" />
+          <span class="count">{hiddenCount}</span>
         </button>
       {/if}
       <button
-        class="btn"
+        class="btn icon-btn"
         disabled={!canReroot}
+        title="Сделать корнем"
+        aria-label="Сделать корнем"
         onclick={() => dispatchCommand({ kind: "reroot" })}
       >
-        Сделать корнем
-      </button>
-      <button class="btn" onclick={() => dispatchCommand({ kind: "reset" })}>
-        Сбросить вид
+        <Icon name="target" />
       </button>
     {/if}
+    <!-- «Сбросить вид» переехал на компас в углу сцены (плавный твин).
+         Настройки — краем правого кластера, видимы во всех режимах. -->
+    <button
+      class="btn icon-btn settings-btn"
+      class:on={settings}
+      aria-pressed={settings}
+      aria-label="Настройки"
+      title="Настройки"
+      onclick={toggleSettings}
+    >
+      <span class="gear"><Icon name="gear" /></span>
+    </button>
   </div>
 </header>
 
@@ -149,33 +143,20 @@
     flex-shrink: 0;
   }
 
-  /* Кнопка-шестерёнка (слева) — вход в окно настроек вместо wordmark. */
-  .settings-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--sp-2);
-    font: inherit;
-    font-size: 0.8rem;
-    letter-spacing: 0.02em;
+  /* Dot-matrix wordmark в бренд-слоте (шрифт Ndot уже в бандле, §I.11). */
+  .wordmark {
+    font-family: var(--font-display);
+    /* Крупно: dot-matrix шрифт читается точками только от ~1.3rem. */
+    font-size: 1.45rem;
+    letter-spacing: var(--track-caps);
     color: var(--text);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--r-pill);
-    padding: 0.35rem 0.85rem 0.35rem 0.6rem;
-    cursor: pointer;
     white-space: nowrap;
-    transition:
-      background var(--motion-micro) var(--ease-out),
-      border-color var(--motion-micro) var(--ease-out),
-      color var(--motion-micro) var(--ease-out);
+    line-height: 1;
+    /* Оптическая компенсация: dot-шрифт «висит» чуть выше базовой линии. */
+    transform: translateY(1px);
   }
-  .settings-btn:hover {
-    background: #232327;
-    border-color: rgba(255, 255, 255, 0.2);
-  }
-  .settings-btn:active {
-    transform: translateY(0.5px);
-  }
+
+  /* Кнопка-шестерёнка — теперь иконка рядом с wordmark. */
   .settings-btn.on {
     color: var(--accent);
     border-color: var(--accent);
@@ -188,11 +169,23 @@
   .settings-btn:hover .gear {
     transform: rotate(35deg);
   }
-  .settings-label {
-    font-family: var(--font-label, inherit);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
+
+  /* Иконка-кнопка: та же пилюля/высота, что и .btn (замок высоты шапки),
+     но квадратный паддинг; подпись несёт title/aria-label. */
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.35rem 0.55rem;
+    color: var(--text-2);
+  }
+  .icon-btn:hover {
+    color: var(--text);
+  }
+  .icon-btn .count {
     font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
   }
 
   /* Кнопки оболочки — матовый «премиум-пластик», скруглённые. */

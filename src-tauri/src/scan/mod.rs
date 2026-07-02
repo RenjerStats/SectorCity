@@ -22,7 +22,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use jwalk::WalkDir;
 use tokio_util::sync::CancellationToken;
 
-use crate::ipc::contract::{AggSpec, Category, NodeFlag, ScanNode, ScanProgress};
+use crate::ipc::contract::{
+    AggSpec, Category, CleanupGroup, CleanupInfo, CleanupItemRef, CleanupReason, NodeFlag,
+    ScanNode, ScanProgress,
+};
 
 pub mod snapshot;
 
@@ -64,8 +67,10 @@ pub struct TreeNode {
     pub cat_mask: u8,
     /// Узел — reparse point / junction: внутрь не спускались.
     pub is_reparse: bool,
-    /// Папка — известный кэш/мусор (кандидат на очистку).
-    pub is_cleanup: bool,
+    /// Кандидатура на очистку: причина от движка правил v2 (`classify::apply_cleanup`,
+    /// пост-проход по дереву); `None` — не кандидат. Производное поле: в снимке не
+    /// хранится, пересчитывается при загрузке.
+    pub cleanup: Option<CleanupReason>,
     /// Узел заблокирован для удаления (системный).
     pub is_locked: bool,
     /// Индексы прямых детей в арене (только для папок).
@@ -314,8 +319,89 @@ impl ScanTree {
             category: Category::Other,
             category_mask: cat_mask,
             flags: vec![NodeFlag::Aggregated],
+            cleanup: None,
             children,
         }
+    }
+
+    /// Индекс узла-скоупа: синтетические суффиксы `::<other>` срезаются (скоуп
+    /// блока «Мелочь» = его реальный уровень-владелец).
+    fn scope_index(&self, scope: &str) -> Option<usize> {
+        let base = scope.split(OTHER_SUFFIX).next().unwrap_or(scope);
+        self.index_of(base)
+    }
+
+    /// Собрать индексы кандидатов на очистку по поддереву `start`. Внутрь
+    /// кандидата не спускаемся (дедуп гарантирует и `apply_cleanup`, но так
+    /// обход дешевле — поддерево кандидата пропускается целиком).
+    fn collect_cleanup(&self, start: usize) -> Vec<usize> {
+        let mut found = Vec::new();
+        let mut stack = vec![start];
+        while let Some(i) = stack.pop() {
+            if self.nodes[i].cleanup.is_some() {
+                found.push(i);
+                continue;
+            }
+            stack.extend(self.nodes[i].children.iter().copied());
+        }
+        found
+    }
+
+    /// Группы кандидатов по причинам ПО ВСЕМУ ПОДДЕРЕВУ `scope` (план §2.2):
+    /// `(причина, уверенность, счётчик, объём, топ-N крупнейших)`. Группы —
+    /// крупнейшие по объёму первыми; внутри группы `top_items` — по размеру.
+    pub fn cleanup_groups(&self, scope: &str, top_n: usize) -> Vec<CleanupGroup> {
+        let Some(start) = self.scope_index(scope) else {
+            return Vec::new();
+        };
+        let mut by_reason: HashMap<CleanupReason, Vec<usize>> = HashMap::new();
+        for i in self.collect_cleanup(start) {
+            // collect_cleanup отдаёт только узлы с Some(reason).
+            let reason = self.nodes[i].cleanup.expect("кандидат без причины");
+            by_reason.entry(reason).or_default().push(i);
+        }
+        let mut groups: Vec<CleanupGroup> = by_reason
+            .into_iter()
+            .map(|(reason, mut idxs)| {
+                // Крупнейшие первыми; при равенстве — по индексу (детерминизм).
+                idxs.sort_by(|&a, &b| self.nodes[b].size.cmp(&self.nodes[a].size).then(a.cmp(&b)));
+                CleanupGroup {
+                    reason,
+                    confidence: crate::classify::confidence_of(reason),
+                    count: idxs.len() as u64,
+                    bytes: idxs.iter().map(|&i| self.nodes[i].size).sum(),
+                    top_items: idxs
+                        .iter()
+                        .take(top_n)
+                        .map(|&i| self.to_contract(i))
+                        .collect(),
+                }
+            })
+            .collect();
+        // Крупнейшие по объёму группы первыми; тай-брейк по причине (детерминизм).
+        groups.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.reason.cmp(&b.reason)));
+        groups
+    }
+
+    /// Все кандидаты причины `reason` в поддереве `scope` (лёгкие ссылки
+    /// путь+размер) — для массовой пометки причины целиком (лениво, по запросу).
+    pub fn cleanup_paths(&self, scope: &str, reason: CleanupReason) -> Vec<CleanupItemRef> {
+        let Some(start) = self.scope_index(scope) else {
+            return Vec::new();
+        };
+        let mut idxs: Vec<usize> = self
+            .collect_cleanup(start)
+            .into_iter()
+            .filter(|&i| self.nodes[i].cleanup == Some(reason))
+            .collect();
+        idxs.sort_by(|&a, &b| self.nodes[b].size.cmp(&self.nodes[a].size).then(a.cmp(&b)));
+        idxs.into_iter()
+            .map(|i| CleanupItemRef {
+                path: self.nodes[i].path.to_string_lossy().into_owned(),
+                size: self.nodes[i].size,
+                mtime: self.nodes[i].mtime,
+            })
+            .collect()
     }
 
     /// Перевести узел арены в контракт IPC (`ScanNode`).
@@ -326,7 +412,7 @@ impl ScanTree {
         if n.is_reparse {
             flags.push(NodeFlag::ReparsePoint);
         }
-        if n.is_cleanup {
+        if n.cleanup.is_some() {
             flags.push(NodeFlag::CleanupCandidate);
         }
         if n.is_locked {
@@ -343,6 +429,10 @@ impl ScanTree {
             category: n.category,
             category_mask: n.cat_mask,
             flags,
+            cleanup: n.cleanup.map(|reason| CleanupInfo {
+                reason,
+                confidence: crate::classify::confidence_of(reason),
+            }),
             // Превью заполняет `node_with_preview` при depth > 1; здесь — пусто.
             children: Vec::new(),
         }
@@ -559,13 +649,8 @@ pub fn scan_with(
             .unwrap_or_else(|| clean_path.to_string_lossy().into_owned());
 
         let category = crate::classify::classify(&clean_path, is_dir);
-        // Кандидат на очистку: для папок — известный кэш/мусор по имени; для
-        // файлов — эвристика «крупный и давно не трогался» (P1, фаза 2).
-        let is_cleanup = if is_dir {
-            crate::classify::is_cleanup_dir(&name)
-        } else {
-            crate::classify::is_stale_large_file(size, mtime, now)
-        };
+        // Кандидаты на очистку размечает пост-проход `apply_cleanup` ПОСЛЕ сборки
+        // дерева (контекст-зависимые правила требуют соседей в арене, план §2.1).
         let is_locked = crate::classify::is_locked_path(&clean_path, &name)
             || crate::classify::is_system_by_attrs(&meta);
 
@@ -582,7 +667,7 @@ pub fn scan_with(
             category,
             cat_mask: 0, // считается снизу вверх после связки дерева (пасс 3)
             is_reparse,
-            is_cleanup,
+            cleanup: None, // размечает пост-проход apply_cleanup
             is_locked,
             children: Vec::new(),
             depth,
@@ -631,12 +716,13 @@ pub fn scan_with(
                 category_bit(category)
             },
             is_reparse: is_reparse_point(&root_meta),
-            is_cleanup: false,
+            cleanup: None,
             is_locked,
             children: Vec::new(),
             depth: 0,
         });
         let by_path = build_path_index(&nodes);
+        // Одиночный корень: правила очистки не применяются (корень не помечаем).
         return Ok(ScanOutcome::Completed(ScanTree {
             nodes,
             root: 0,
@@ -689,12 +775,18 @@ pub fn scan_with(
     let root_idx = parents.iter().position(|p| p.is_none()).unwrap_or(0);
 
     let by_path = build_path_index(&nodes);
-    Ok(ScanOutcome::Completed(ScanTree {
+    let mut tree = ScanTree {
         nodes,
         root: root_idx,
         error_count: errors.load(Ordering::Relaxed),
         by_path,
-    }))
+    };
+
+    // Пасс 4: движок правил очистки v2 — пост-проход по готовому дереву (соседи
+    // уже в арене → контекст-зависимые правила дёшевы, план §2.1).
+    crate::classify::apply_cleanup(&mut tree, now);
+
+    Ok(ScanOutcome::Completed(tree))
 }
 
 /// Индекс «очищенный путь → индекс узла» по арене.
@@ -1051,6 +1143,41 @@ mod tests {
             "размер «Мелочи» в превью и после drill должен совпадать"
         );
         assert_eq!(preview_other.size, 45, "20+15+10 свёрнуты в «Мелочь»");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cleanup_groups_aggregate_by_reason() {
+        let root = temp_dir("groups");
+        // Проект: node_modules (PackageCache, 100 Б) + две времянки (TempFile, 50 Б).
+        let proj = root.join("proj");
+        fs::create_dir_all(proj.join("node_modules")).unwrap();
+        write_file(&proj.join("package.json"), 5);
+        write_file(&proj.join("node_modules").join("a.js"), 100);
+        write_file(&root.join("x.tmp"), 30);
+        write_file(&root.join("y.tmp"), 20);
+
+        let tree = scan_root(&root).unwrap();
+        let root_path = tree.root_node().path.to_string_lossy().into_owned();
+
+        let groups = tree.cleanup_groups(&root_path, 10);
+        assert_eq!(groups.len(), 2, "две причины: кэш пакетов и времянки");
+        // Крупнейшая по объёму группа первой.
+        assert_eq!(groups[0].reason, CleanupReason::PackageCache);
+        assert_eq!((groups[0].count, groups[0].bytes), (1, 100));
+        assert_eq!(groups[1].reason, CleanupReason::TempFile);
+        assert_eq!((groups[1].count, groups[1].bytes), (2, 50));
+        // top_items — крупнейшие первыми, несут (reason, confidence) в контракте.
+        let top = &groups[1].top_items;
+        assert_eq!(top.len(), 2);
+        assert!(top[0].size >= top[1].size);
+        assert!(top[0].cleanup.is_some());
+
+        // Ленивый полный список причины — для массовой пометки.
+        let refs = tree.cleanup_paths(&root_path, CleanupReason::TempFile);
+        assert_eq!(refs.len(), 2);
+        assert!(refs[0].size >= refs[1].size);
 
         fs::remove_dir_all(&root).ok();
     }

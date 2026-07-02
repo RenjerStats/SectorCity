@@ -5,12 +5,14 @@
    * (через колбэк `onContext` слоя взаимодействия), действия — колбэками туда же.
    * Прямой связи raycaster ↔ DOM нет (docs §1): Scene — посредник.
    *
-   * Семантика разделена с ЛКМ: левая кнопка = drill/карточка/пометка (как раньше),
-   * правая = это меню. Для системных (`locked`) узлов снос/пометка — disabled с
+   * Семантика разделена с ЛКМ: левая кнопка = drill/карточка (в режиме сканера
+   * пометка — Ctrl+ЛКМ), правая = это меню. Для системных (`locked`) узлов
+   * снос/пометка — disabled с
    * подписью-замком. У синтетического блока «Мелочь» (`aggregated`) реального пути
    * нет → доступны только «Открыть» и «Свойства».
    */
   import type { ScanNode } from "../ipc/contract";
+  import Icon from "./Icon.svelte";
 
   interface Menu {
     node: ScanNode;
@@ -145,8 +147,11 @@
   {#if cleanup && hasRealPath}
     <div class="sep"></div>
     {#if isLocked}
+      <!-- Линейный SVG-замок вместо эмодзи (план §5: эмодзи цветной, выбивается
+           из монохрома). -->
       <div class="item locked" role="menuitem" aria-disabled="true">
-        <span class="lock">🔒</span> Системный — снос заблокирован
+        <span class="lock"><Icon name="lock" size={13} /></span>
+        Системный — снос заблокирован
       </div>
     {:else}
       <button
@@ -214,6 +219,8 @@
     cursor: default;
   }
   .lock {
-    font-size: 0.75rem;
+    display: inline-flex;
+    align-items: center;
+    margin-right: 0.35rem;
   }
 </style>

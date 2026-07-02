@@ -56,10 +56,21 @@ export interface SceneHandle {
   ): Promise<void>;
   /** Жёстко поставить камеру (позиция + цель) и обновить контролы. */
   placeCamera(position: Vector3, target: Vector3): void;
+  /** Текущая цель орбиты (клон) — для компаса/поворота камеры «на север». */
+  cameraTarget(): Vector3;
   /** Спроецировать мировую точку в пиксели canvas; `visible` — точка перед камерой. */
   worldToScreen(v: Vector3): { x: number; y: number; visible: boolean };
-  /** Вернуть камеру в исходный обзорный ракурс. */
-  resetView(): void;
+  /**
+   * Прекомпилировать шейдеры всего текущего содержимого сцены (transmission-стекло
+   * куполов + PMREM — самые тяжёлые). Через `renderer.compileAsync` компиляция идёт
+   * параллельно (`KHR_parallel_shader_compile`), не блокируя кадр, — вызывать после
+   * первой сборки уровня и лишь потом снимать оверлей/фейд (план §1.2, jank первого
+   * кадра после пересборки).
+   */
+  compile(): Promise<void>;
+  /** Вернуть камеру в исходный обзорный ракурс. `ms > 0` — плавный твин
+   *  (как drill), иначе мгновенно. */
+  resetView(ms?: number): void;
   /** Освободить GPU-ресурсы и снять слушатели. Вызывать при размонтировании. */
   dispose(): void;
 }
@@ -261,6 +272,42 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
   }
   requestAnimationFrame(tick);
 
+  /** Твин камеры (общая реализация для `flyTo` ручки и плавного `resetView`). */
+  function flyTo(
+    position: Vector3,
+    target: Vector3,
+    ms: number,
+    onArrive?: () => void,
+    onProgress?: (p: number) => void,
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      // На время перелёта глушим пользовательский ввод, чтобы не драться с твином.
+      controls.enabled = false;
+      const camFrom = camera.position.clone();
+      const tgtFrom = controls.target.clone();
+      const t = { p: 0 };
+      new Tween(t, tweens)
+        .to({ p: 1 }, ms)
+        // Easing применяем ВРУЧНУЮ к камере (Cubic.InOut, как раньше) — чтобы в
+        // `onProgress` отдать СЫРОЙ прогресс: сопутствующие анимации навигатора
+        // ведут собственные кривые, но на том же отрезке времени.
+        .onUpdate(() => {
+          const e = Easing.Cubic.InOut(t.p);
+          camera.position.lerpVectors(camFrom, position, e);
+          controls.target.lerpVectors(tgtFrom, target, e);
+          onProgress?.(t.p);
+        })
+        .onComplete(() => {
+          // rebase идёт ДО повторного включения контролов и резолва, в этом же
+          // кадре — следующий render уже нормированный (origin shift невидим).
+          onArrive?.();
+          controls.enabled = true;
+          resolve();
+        })
+        .start();
+    });
+  }
+
   return {
     content,
     camera,
@@ -272,38 +319,14 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
       frameCallbacks.add(cb);
       return () => frameCallbacks.delete(cb);
     },
-    flyTo(position, target, ms, onArrive, onProgress) {
-      return new Promise((resolve) => {
-        // На время перелёта глушим пользовательский ввод, чтобы не драться с твином.
-        controls.enabled = false;
-        const camFrom = camera.position.clone();
-        const tgtFrom = controls.target.clone();
-        const t = { p: 0 };
-        new Tween(t, tweens)
-          .to({ p: 1 }, ms)
-          // Easing применяем ВРУЧНУЮ к камере (Cubic.InOut, как раньше) — чтобы в
-          // `onProgress` отдать СЫРОЙ прогресс: сопутствующие анимации навигатора
-          // ведут собственные кривые, но на том же отрезке времени.
-          .onUpdate(() => {
-            const e = Easing.Cubic.InOut(t.p);
-            camera.position.lerpVectors(camFrom, position, e);
-            controls.target.lerpVectors(tgtFrom, target, e);
-            onProgress?.(t.p);
-          })
-          .onComplete(() => {
-            // rebase идёт ДО повторного включения контролов и резолва, в этом же
-            // кадре — следующий render уже нормированный (origin shift невидим).
-            onArrive?.();
-            controls.enabled = true;
-            resolve();
-          })
-          .start();
-      });
-    },
+    flyTo,
     placeCamera(position, target) {
       camera.position.copy(position);
       controls.target.copy(target);
       controls.update();
+    },
+    cameraTarget() {
+      return controls.target.clone();
     },
     worldToScreen(v) {
       const p = v.clone().project(camera);
@@ -313,7 +336,20 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
         visible: p.z < 1,
       };
     },
-    resetView() {
+    async compile() {
+      // Ошибку компиляции глотаем: без прекомпиляции шейдеры соберутся синхронно
+      // на первом кадре (медленнее, но корректно) — падать из-за этого не надо.
+      try {
+        await renderer.compileAsync(scene, camera);
+      } catch (err) {
+        console.warn("прекомпиляция шейдеров не удалась:", err);
+      }
+    },
+    resetView(ms) {
+      if (ms && ms > 0) {
+        void flyTo(INITIAL_CAMERA_POS.clone(), INITIAL_TARGET.clone(), ms);
+        return;
+      }
       camera.position.copy(INITIAL_CAMERA_POS);
       controls.target.copy(INITIAL_TARGET);
       controls.update();

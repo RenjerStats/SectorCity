@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
 
-use super::contract::{AggSpec, DeleteResult, ScanNode, ScanProgress};
+use super::contract::{
+    AggSpec, CleanupGroup, CleanupItemRef, CleanupReason, CurrentRoot, DeleteResult, ScanNode,
+    ScanProgress,
+};
 use crate::error::{AppError, AppResult};
 use crate::scan::{scan_with, snapshot, ScanOutcome};
 use crate::state::AppState;
@@ -138,15 +141,28 @@ pub async fn get_level(
 }
 
 /// Корень текущего дерева (загруженного снимка или последнего скана), если есть.
-/// Фронт по нему строит стартовый уровень без рескана.
+/// Фронт по нему строит стартовый уровень без рескана. Пока снимок читается в
+/// фоне (`snapshot_loading`), отвечаем `loading = true` — фронт покажет «загружаю
+/// снимок…» и дождётся события `snapshot://ready` вместо старта на демо-городе.
 #[tauri::command]
-pub fn current_root(state: State<'_, AppState>) -> AppResult<Option<String>> {
-    Ok(state
+pub fn current_root(state: State<'_, AppState>) -> AppResult<CurrentRoot> {
+    // Порядок важен (зеркален фоновой задаче «положить дерево → снять флаг»):
+    // сначала флаг, потом корень. Тогда «loading=false, root=None» гарантированно
+    // значит «снимка нет и не будет», а не гонку с фоновым потоком; loading=true
+    // при уже готовом дереве безвреден — событие `snapshot://ready` ещё впереди.
+    let loading = state
+        .snapshot_loading
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let root = state
         .scan
         .lock()
         .unwrap()
         .as_ref()
-        .map(|tree| tree.root_node().path.to_string_lossy().into_owned()))
+        .map(|tree| tree.root_node().path.to_string_lossy().into_owned());
+    Ok(CurrentRoot {
+        loading: loading && root.is_none(),
+        root,
+    })
 }
 
 /// Полная правда по одному узлу — для карточки/тултипа.
@@ -192,6 +208,42 @@ pub async fn search(query: String, state: State<'_, AppState>) -> AppResult<Vec<
     hits.sort_by(|&a, &b| tree.nodes[b].size.cmp(&tree.nodes[a].size).then(a.cmp(&b)));
     hits.truncate(SEARCH_LIMIT);
     Ok(hits.into_iter().map(|i| tree.to_contract(i)).collect())
+}
+
+/// Топ-N кандидатов на причину в ответе `list_cleanup` (остальные — лениво
+/// через `cleanup_paths`, план §2.2).
+const CLEANUP_TOP_ITEMS: usize = 10;
+
+/// Группы кандидатов на очистку по причинам ПО ВСЕМУ ПОДДЕРЕВУ `scope`
+/// (панель причин сканера мусора, план §2.2). Синтетический суффикс
+/// `::<other>` в `scope` срезается. Без снимка/скана — пусто.
+#[tauri::command]
+pub async fn list_cleanup(
+    scope: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<CleanupGroup>> {
+    tracing::info!(%scope, "list_cleanup");
+    let guard = state.scan.lock().unwrap();
+    Ok(guard
+        .as_ref()
+        .map(|tree| tree.cleanup_groups(&scope, CLEANUP_TOP_ITEMS))
+        .unwrap_or_default())
+}
+
+/// Все кандидаты одной причины в поддереве `scope` (лёгкие ссылки путь+размер,
+/// крупнейшие первыми) — для массовой пометки причины целиком.
+#[tauri::command]
+pub async fn cleanup_paths(
+    scope: String,
+    reason: CleanupReason,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<CleanupItemRef>> {
+    tracing::info!(%scope, ?reason, "cleanup_paths");
+    let guard = state.scan.lock().unwrap();
+    Ok(guard
+        .as_ref()
+        .map(|tree| tree.cleanup_paths(&scope, reason))
+        .unwrap_or_default())
 }
 
 /// Переместить список файлов/папок в Корзину.

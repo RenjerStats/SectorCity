@@ -16,6 +16,8 @@
     AGGREGATE_COLOR,
   } from "../three/palette";
   import { formatSize, formatDate } from "../format";
+  import { REASON_META, CONFIDENCE_META } from "../cleanup";
+  import CategoryGlyph from "./CategoryGlyph.svelte";
   import type { Category, ScanNode } from "../ipc/contract";
 
   interface Props {
@@ -148,10 +150,28 @@
             node.category,
           )}; border-color: {getCategoryBg(node.category, 0.3)}"
         >
+          <!-- Dot-глиф категории (тикет 003) — избыточный к цвету канал. -->
+          <CategoryGlyph category={node.category} size={12} />
           {CATEGORY_LABEL[node.category]}
         </span>
       {/if}
     </div>
+
+    <!-- Причина кандидатуры на очистку — видна УЖЕ в компактном hover-виде
+         (полное объяснение — в развёрнутой карточке ниже). -->
+    {#if node.cleanup}
+      <div class="row reason-row">
+        <span
+          class="conf-dot"
+          style:background={CONFIDENCE_META[node.cleanup.confidence].cssVar}
+          aria-hidden="true"
+        ></span>
+        <span class="reason-text">
+          {REASON_META[node.cleanup.reason].label}
+          · {CONFIDENCE_META[node.cleanup.confidence].label}
+        </span>
+      </div>
+    {/if}
 
     <!-- Подробности (только в развёрнутом виде). `in:slide|global` — анимация
          РАЗВОРОТА проигрывается при монтировании окна (в т.ч. при выборе нового
@@ -227,7 +247,7 @@
           </div>
         {/if}
 
-        {#if node.flags.includes("cleanupCandidate") && !node.flags.includes("locked")}
+        {#if node.cleanup && !node.flags.includes("locked")}
           <div class="cleanup-warning">
             <svg
               class="warning-icon"
@@ -241,7 +261,21 @@
                 clip-rule="evenodd"
               />
             </svg>
-            <span>Кандидат на очистку</span>
+            <div class="cleanup-info">
+              <span class="cleanup-title">
+                {REASON_META[node.cleanup.reason].label}
+                <span
+                  class="cleanup-conf"
+                  style:color={CONFIDENCE_META[node.cleanup.confidence].cssVar}
+                  title={CONFIDENCE_META[node.cleanup.confidence].hint}
+                >
+                  · {CONFIDENCE_META[node.cleanup.confidence].label}
+                </span>
+              </span>
+              <span class="cleanup-explain">
+                {REASON_META[node.cleanup.reason].explain}
+              </span>
+            </div>
           </div>
         {/if}
 
@@ -467,6 +501,9 @@
 
   /* Бэдж категории — цвет канала категории (инлайн-стили). */
   .cat-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
     font-size: 0.72rem;
     font-weight: 600;
     padding: 0.15rem 0.45rem;
@@ -524,10 +561,32 @@
     margin-bottom: 0.65rem;
   }
 
-  /* Кандидат на очистку — семантический амбер (--stale), не акцент. */
-  .cleanup-warning {
+  /* Компактная строка причины (видна в hover-виде): глиф уверенности + подпись. */
+  .reason-row {
     display: flex;
     align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.3rem;
+    font-size: 0.72rem;
+    color: var(--text-2);
+  }
+  .conf-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .reason-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Кандидат на очистку — семантический амбер (--stale), не акцент.
+     v2: причина + уверенность + объяснение словами (план §2.3). */
+  .cleanup-warning {
+    display: flex;
+    align-items: flex-start;
     gap: 0.4rem;
     background: rgba(224, 163, 62, 0.1);
     border: 1px solid rgba(224, 163, 62, 0.3);
@@ -537,6 +596,24 @@
     font-size: 0.76rem;
     font-weight: 600;
     margin-bottom: 0.65rem;
+  }
+  .cleanup-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+  .cleanup-title {
+    font-weight: 600;
+  }
+  .cleanup-conf {
+    font-weight: 500;
+  }
+  .cleanup-explain {
+    color: var(--text-2);
+    font-weight: 400;
+    font-size: 0.72rem;
+    line-height: 1.35;
   }
   .warning-icon {
     width: 0.85rem;

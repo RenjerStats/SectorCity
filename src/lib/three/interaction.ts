@@ -41,9 +41,11 @@ export interface InteractionCallbacks {
   /** Клик по зданию-файлу → SELECT (карточка над зданием); `null` = снять выбор
    *  (клик мимо зданий). Район и «Прочее» уходят в `onDrill`, не сюда. */
   onSelect(node: ScanNode | null): void;
-  /** Активен ли режим сканера мусора (меняет семантику клика по файлу на пометку). */
+  /** Активен ли режим сканера мусора (включает пометку по Ctrl+ЛКМ). */
   isCleanup(): boolean;
-  /** Режим cleanup: клик по зданию-файлу — пометить/снять на снос (vision §I.7). */
+  /** Режим cleanup: Ctrl+ЛКМ по узлу (файлу ИЛИ папке-району) — пометить/снять
+   *  на снос. Обычный ЛКМ ведёт себя как в стандартном режиме (карточка/drill),
+   *  чтобы не путать пользователя; пометка также доступна через ПКМ-меню. */
   onMark(node: ScanNode): void;
   /**
    * ПКМ по узлу (vision §I.10): открыть контекстное меню. `info` — узел под
@@ -244,7 +246,8 @@ export function setupInteraction(
     const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
     down = null;
     if (moved > CLICK_SLOP) return; // это был пан камеры, не клик
-    pick();
+    // Ctrl (или ⌘ на mac) — модификатор пометки на снос в режиме cleanup.
+    pick(e.ctrlKey || e.metaKey);
   }
 
   /** ПКМ: разрешить узел под курсором (точно по координатам события) и открыть
@@ -277,7 +280,7 @@ export function setupInteraction(
     cb.onContext(info, e.clientX, e.clientY);
   }
 
-  function pick(): void {
+  function pick(markModifier: boolean): void {
     if (!isInteractive(handle.content)) return; // твин зума ещё идёт
     const view = activeView(handle.content);
     if (!view) return;
@@ -291,6 +294,14 @@ export function setupInteraction(
       setSelected(null); // клик мимо разрешимого узла — снять выбор
       return;
     }
+    // Режим сканера мусора: Ctrl+ЛКМ помечает УЗЕЛ ПОД КУРСОРОМ на снос — и файл,
+    // и папку-район (проверка ДО drill-ветки, иначе папку не пометить). Обычный
+    // ЛКМ ниже ведёт себя как в стандартном режиме (карточка/drill) — по фидбеку:
+    // разная семантика ЛКМ путала, а папки было не выбрать.
+    if (markModifier && cb.isCleanup()) {
+      cb.onMark(info.node);
+      return;
+    }
     // Drill в реальные папки-районы И в навигируемый блок «Прочее» (бэк раскрывает
     // синтетический путь `{уровень}::<other>` в его хвост). Цель — drillTarget:
     // внутри вложенного превью это родительский район (не aggregated), поэтому клик
@@ -299,12 +310,6 @@ export function setupInteraction(
     if (t.isDir || t.flags.includes("aggregated")) {
       setSelected(null); // уходим на новый уровень — старый выбор не актуален
       cb.onDrill(t);
-      return;
-    }
-    // Режим сканера мусора: клик по зданию-файлу — пометить/снять на снос, а не
-    // открывать карточку (районы/«Прочее» выше всё ещё drill — нужно ходить по дереву).
-    if (cb.isCleanup()) {
-      cb.onMark(info.node);
       return;
     }
     setSelected(hit, info.node);

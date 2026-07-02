@@ -17,6 +17,7 @@
     resetCategories,
   } from "../store/mode";
   import { legendOpen, toggleLegend } from "../store/ui";
+  import CategoryGlyph from "./CategoryGlyph.svelte";
 
   const ORDER: Category[] = [
     "code",
@@ -99,12 +100,16 @@
               soloCategory(cat);
             }}
           >
+            <!-- Dot-глиф категории (тикет 003): избыточный к цвету канал —
+                 категории различимы и без цвета (дальтонизм, vision §II.2). -->
             <span
-              class="dot"
-              style="background:{filter.has(cat)
+              class="glyph"
+              style="color:{filter.has(cat)
                 ? hex(CATEGORY_COLOR[cat])
                 : 'var(--text-muted)'}"
-            ></span>
+            >
+              <CategoryGlyph category={cat} size={15} />
+            </span>
             <span class="name">{CATEGORY_LABEL[cat]}</span>
           </button>
         {/each}
@@ -234,11 +239,11 @@
   .cat.off .name {
     color: var(--text-muted);
   }
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
+  .glyph {
+    display: inline-flex;
+    align-items: center;
     flex-shrink: 0;
+    transition: color var(--motion-micro) var(--ease-out);
   }
   .name {
     font-size: 0.74rem;

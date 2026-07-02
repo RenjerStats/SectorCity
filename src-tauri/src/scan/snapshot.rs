@@ -127,7 +127,9 @@ pub fn save(tree: &ScanTree, db_path: &Path) -> rusqlite::Result<()> {
                 n.child_count as i64,
                 category_to_str(n.category),
                 n.is_reparse as i64,
-                n.is_cleanup as i64,
+                // Совместимость схемы v1: булев флаг. Причина не хранится —
+                // производное поле, пересчитывается правилами при загрузке.
+                n.cleanup.is_some() as i64,
                 n.is_locked as i64,
                 n.depth as i64,
             ])?;
@@ -191,7 +193,9 @@ pub fn load(db_path: &Path) -> rusqlite::Result<ScanTree> {
                 category: category_from_str(&category),
                 cat_mask: 0, // производное поле — пересчитаем после связки детей
                 is_reparse: r.get::<_, i64>(10)? != 0,
-                is_cleanup: r.get::<_, i64>(11)? != 0,
+                // Колонка is_cleanup (11) игнорируется: причины очистки —
+                // производное, пересчитываем движком правил после связки детей.
+                cleanup: None,
                 is_locked: r.get::<_, i64>(12)? != 0,
                 children: Vec::new(),
                 depth: r.get::<_, i64>(13)? as usize,
@@ -220,12 +224,22 @@ pub fn load(db_path: &Path) -> rusqlite::Result<ScanTree> {
     super::compute_category_masks(&mut nodes, &parents);
 
     let by_path = build_path_index(&nodes);
-    Ok(ScanTree {
+    let mut tree = ScanTree {
         nodes,
         root: root as usize,
         error_count,
         by_path,
-    })
+    };
+
+    // Причины очистки — производное: пересчитываем движком правил (v2), как и
+    // при свежем скане. Снимок остаётся совместим со старой схемой.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    crate::classify::apply_cleanup(&mut tree, now);
+
+    Ok(tree)
 }
 
 #[cfg(test)]

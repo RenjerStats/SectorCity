@@ -89,22 +89,12 @@ export const CITY_SPAN = 200;
  * делает drill чистым зумом: содержимое папки имеет тот же относительный зазор и
  * как превью под стеклом (+2), и как активный уровень (+1), поэтому при входе оно
  * не «переразъезжается» (раньше +2 был плотным `0.03`, а на drill становился `0.11`
- * → дома ужимались, освобождая «дороги»). Платой за бесшовность идёт layout-различие
- * «широкая дорога vs плотный квартал» — его планируем вернуть РЕНДЕРОМ дорог (бордюры
- * у активных +1), а не раскладкой. Значение — один регулятор плотности, можно крутить.
+ * → дома ужимались, освобождая «дороги»). Дороги-бордюры упразднены окончательно
+ * (vision §II.4, ревизия): носитель dot-приёма — земля целиком (`buildGroundDots`),
+ * разделение блоков несут постаменты и стекло. Значение ниже — ЕДИНСТВЕННЫЙ
+ * регулятор плотности: плотнее/просторнее — крутить только его.
  */
 const GAP_FRAC = 0.06; // единая доля-зазор между соседями на любой глубине
-/**
- * Дороги — точечные «бордюры» вокруг блоков (точки из геометрии раскладки, не из
- * мировой решётки): по периметру каждого блока, равномерно вдоль стороны, с
- * яркими точками на углах-перекрёстках. Вокруг города — равномерное поле-апрон,
- * гаснущее по расстоянию от края города (не по камере).
- */
-const CURB_OFFSET = 1.4; // вынос бордюра в зазор от грани блока
-const CURB_STEP = 4; // шаг точек вдоль стороны блока
-const CURB_DOT_ALPHA = 0.16; // яркость точки бордюра (смешение с белым)
-const CORNER_DOT_ALPHA = 0.26; // яркость точки-перекрёстка (угол)
-const CORNER_SCALE = 1.7; // во сколько крупнее точка-перекрёсток
 const DOT_R = 0.55; // базовый радиус точки, мир
 const GROUND_APRON = 3; // во сколько раз земля больше города
 const GROUND_EDGE_COLOR = 0x080808; // = --bg: к нему гаснут земля и сетка у краёв
@@ -126,6 +116,20 @@ const MAX_AGE_SECONDS = 3 * 365 * 24 * 3600; // ~3 года
 const MIN_VALUE = 1;
 /** Множитель затемнения несовпадающих с фильтром/поиском узлов (подсветка). */
 export const DIM_FACTOR = 0.12;
+
+/**
+ * Тинт-множители уверенности кандидата в режиме очистки (план §2.3): кандидат
+ * подкрашивается уверенностью правила — Safe к `--safe` (зелёный), Likely к
+ * `--stale` (амбер), Review — нейтральный (без тинта). Значения светлее токенов
+ * DOM: per-instance цвет — МНОЖИТЕЛЬ поверх материалов, тёмный тинт гасил бы
+ * здание вместо подкраски.
+ */
+const CONFIDENCE_TINT: Record<string, number> = {
+  safe: 0x7fd4a8,
+  likely: 0xe8c07a,
+};
+/** Переиспользуемый Color для тинта (без аллокаций в перекраске уровня). */
+const TINT_SCRATCH = new Color();
 
 /**
  * Высота базовой плиты-постамента папки (мир). Плита — это И обводка-«поребрик»
@@ -710,7 +714,10 @@ function modeColorInto(
   if (cleanup) {
     if (cleanup.isMarked(node)) return out.set(CLEANUP_MARK_COLOR);
     out.set(base);
-    if (!cleanup.isCandidate(node)) out.multiplyScalar(DIM_FACTOR);
+    if (!cleanup.isCandidate(node)) return out.multiplyScalar(DIM_FACTOR);
+    // Кандидат: подкраска уверенностью правила (Safe/Likely; Review — нейтрально).
+    const tint = node.cleanup && CONFIDENCE_TINT[node.cleanup.confidence];
+    if (tint !== undefined && tint !== 0) out.multiply(TINT_SCRATCH.set(tint));
     return out;
   }
   out.set(base);
@@ -865,14 +872,9 @@ export function buildLevel(
   const { districts, buildings } = layoutNested(nodes, span, nowSeconds);
 
   // Земля — большой матовый «апрон» вокруг города с радиальным угасанием цвета к
-  // краям. Дороги — отдельный слой точек-«бордюров» вокруг блоков + поле-сетка.
+  // краям.
   const ground = makeFadedGround(span);
   group.add(ground);
-  const roadDots = buildRoadDots(span, districts, buildings);
-  // ВРЕМЕННО: точки-«бордюры» вокруг блоков (дороги) отключены (отладка плотности/
-  // шва). Меш строится и переключается visible, но в группу не добавлен. Вернуть —
-  // раскомментировать строку ниже.
-  // group.add(roadDots);
   // Dot-grid земли (vision §II.4) — регулярная мировая сетка точек по всему апрону,
   // включая площадь под городом (в зазорах между зданиями читается как «текстура
   // земли»). Без бордюров-дорог. Видимость зеркалит землю (см. setGroundShown).
@@ -1178,7 +1180,6 @@ export function buildLevel(
   /** Привести инстансы в декор-облик: притушено, исключённое поддерево скрыто. */
   function applyDecor(): void {
     ground.visible = false;
-    roadDots.visible = false;
     groundDots.visible = false;
 
     for (const g of buildGroups) {
@@ -1227,7 +1228,6 @@ export function buildLevel(
   /** Вернуть активный облик: всё видимо, материал плотный/белый, пикинг доступен. */
   function applyActive(): void {
     ground.visible = true;
-    roadDots.visible = true;
     groundDots.visible = true;
 
     for (const g of buildGroups) {
@@ -1404,7 +1404,6 @@ export function buildLevel(
     },
     setGroundShown(visible) {
       ground.visible = visible;
-      roadDots.visible = visible;
       groundDots.visible = visible;
     },
     setActive() {
@@ -1505,97 +1504,13 @@ interface DotSpec {
   alpha: number;
 }
 
-/** Точки по периметру блока (бордюр): углы — ярко/крупно, стороны — равномерно. */
-function addCurbDots(dots: DotSpec[], r: TreemapRect): void {
-  const x0 = r.x0 - CURB_OFFSET;
-  const x1 = r.x1 + CURB_OFFSET;
-  const z0 = r.y0 - CURB_OFFSET; // treemap-y → world-z
-  const z1 = r.y1 + CURB_OFFSET;
-  // Углы-перекрёстки.
-  for (const [cx, cz] of [
-    [x0, z0],
-    [x1, z0],
-    [x1, z1],
-    [x0, z1],
-  ]) {
-    dots.push({ x: cx, z: cz, scale: CORNER_SCALE, alpha: CORNER_DOT_ALPHA });
-  }
-  // Промежуточные точки сторон (без концов — углы уже добавлены).
-  const side = (
-    a0: number,
-    a1: number,
-    fixed: number,
-    horizontal: boolean,
-  ): void => {
-    const len = a1 - a0;
-    const n = Math.floor(len / CURB_STEP);
-    if (n < 2) return;
-    const step = len / n;
-    for (let k = 1; k < n; k++) {
-      const a = a0 + k * step;
-      dots.push(
-        horizontal
-          ? { x: a, z: fixed, scale: 1, alpha: CURB_DOT_ALPHA }
-          : { x: fixed, z: a, scale: 1, alpha: CURB_DOT_ALPHA },
-      );
-    }
-  };
-  side(x0, x1, z0, true); // низ
-  side(x0, x1, z1, true); // верх
-  side(z0, z1, x0, false); // лево
-  side(z0, z1, x1, false); // право
-}
-
-/**
- * Слой точек-дорог: бордюры вокруг блоков верхнего уровня (купола-районы + файлы) +
- * равномерное поле-сетка на апроне, гаснущее по расстоянию от края города.
- * Один `InstancedMesh` с per-instance цветом; цвет точки = локальный цвет земли,
- * подмешанный к белому на её «яркость», так далёкие точки тают вместе с землёй.
- */
-function buildRoadDots(
-  span: LevelSpan,
-  districts: DistrictAcc[],
-  buildings: BuildingAcc[],
-): InstancedMesh {
-  const dots: DotSpec[] = [];
-
-  // 1) Бордюры вокруг блоков верхнего уровня (купола +1 + файлы верхнего уровня;
-  //    вложенное содержимое куполов — не блоки, у них нет дорог).
-  for (const d of districts) {
-    if (d.d3depth === 1) addCurbDots(dots, d.rect);
-  }
-  for (const b of buildings) {
-    if (b.districtIdx === null) addCurbDots(dots, b.rect);
-  }
-
-  // 2) Поле-сетка вокруг города; точки внутри города опускаем (там бордюры).
-  const cityHalfW = span.w / 2;
-  const cityHalfD = span.d / 2;
-  const S = Math.max(span.w, span.d) * GROUND_APRON;
-  const half = S / 2;
-  const falloff = Math.max(span.w, span.d); // угасание за ~ширину города
-  const skipW = cityHalfW + CURB_OFFSET * 2;
-  const skipD = cityHalfD + CURB_OFFSET * 2;
-  for (let x = -half; x <= half; x += APRON_STEP) {
-    for (let z = -half; z <= half; z += APRON_STEP) {
-      if (Math.abs(x) < skipW && Math.abs(z) < skipD) continue; // город
-      const dx = Math.max(0, Math.abs(x) - cityHalfW);
-      const dz = Math.max(0, Math.abs(z) - cityHalfD);
-      const fade = 1 - Math.hypot(dx, dz) / falloff;
-      if (fade <= 0.02) continue; // далёкие невидимые точки не создаём
-      dots.push({ x, z, scale: 1, alpha: APRON_DOT_ALPHA * fade });
-    }
-  }
-
-  return makeDotMesh(dots, span);
-}
-
 /**
  * Dot-grid земли (vision §II.4): регулярная мировая сетка точек по ВСЕМУ апрону,
  * включая площадь под городом (в зазорах между зданиями читается как «текстура
  * земли», под домами скрыта их непрозрачностью). Яркость точки — bright в центре,
  * радиально гаснет к краям (та же кривая `groundFade`, что и у самой земли), поэтому
- * сетка тает в фон вместе с апроном. Без бордюров-дорог (их несёт `buildRoadDots`).
+ * сетка тает в фон вместе с апроном. Дорог-бордюров нет (vision §II.4, ревизия):
+ * разделение блоков несут постаменты и стекло куполов.
  */
 function buildGroundDots(span: LevelSpan): InstancedMesh {
   const dots: DotSpec[] = [];

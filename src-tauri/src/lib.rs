@@ -10,7 +10,9 @@ mod ipc;
 mod scan;
 mod state;
 
-use tauri::Manager;
+use std::sync::atomic::Ordering;
+
+use tauri::{Emitter, Manager};
 
 pub use error::{AppError, AppResult};
 pub use state::AppState;
@@ -37,20 +39,49 @@ pub fn run() {
             ipc::commands::get_level,
             ipc::commands::get_node_detail,
             ipc::commands::search,
+            ipc::commands::list_cleanup,
+            ipc::commands::cleanup_paths,
             ipc::commands::delete_to_trash,
         ])
         .setup(|app| {
             // Переоткрытие без рескана: если снимок есть — поднимаем его в стейт.
+            // Чтение SQLite уносим в blocking-пул (план §1.1): на большом снимке
+            // синхронная загрузка здесь держала показ окна. Пока фон читает, флаг
+            // `snapshot_loading` заставляет `current_root` отвечать «ещё не готов»;
+            // по завершении летит `snapshot://ready` с корнем (или null).
             let handle = app.handle().clone();
             if let Some(db) = ipc::commands::snapshot_db_path(&handle) {
                 if db.exists() {
-                    match scan::snapshot::load(&db) {
-                        Ok(tree) => {
-                            tracing::info!(nodes = tree.nodes.len(), "снимок загружен");
-                            *handle.state::<AppState>().scan.lock().unwrap() = Some(tree);
+                    handle
+                        .state::<AppState>()
+                        .snapshot_loading
+                        .store(true, Ordering::SeqCst);
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let t0 = std::time::Instant::now();
+                        match scan::snapshot::load(&db) {
+                            Ok(tree) => {
+                                tracing::info!(
+                                    nodes = tree.nodes.len(),
+                                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                                    "снимок загружен"
+                                );
+                                *handle.state::<AppState>().scan.lock().unwrap() = Some(tree);
+                            }
+                            Err(e) => tracing::warn!(error = %e, "снимок не загружен"),
                         }
-                        Err(e) => tracing::warn!(error = %e, "снимок не загружен"),
-                    }
+                        let state = handle.state::<AppState>();
+                        // Порядок важен: сначала снять флаг, потом взять корень —
+                        // тогда «loading=false и root=null» гарантированно значит
+                        // «снимка нет», а не гонку с этим потоком.
+                        state.snapshot_loading.store(false, Ordering::SeqCst);
+                        let root = state
+                            .scan
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .map(|tree| tree.root_node().path.to_string_lossy().into_owned());
+                        let _ = handle.emit("snapshot://ready", root);
+                    });
                 }
             }
             Ok(())

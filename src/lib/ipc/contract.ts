@@ -97,11 +97,81 @@ export interface ScanNode {
   categoryMask: number;
   flags: NodeFlag[];
   /**
+   * Кандидатура на очистку: (причина, уверенность) от движка правил v2.
+   * Отсутствует, когда узел не кандидат (бэк не сериализует пустое). Флаг
+   * `cleanupCandidate` в `flags` дублируется (обратная совместимость).
+   */
+  cleanup?: CleanupInfo;
+  /**
    * Превью детей (вложенный treemap, +1 уровень). Присутствует ТОЛЬКО при
    * `getLevel(depth > 1)` и только у папок (рекурсивно при `depth > 2`); иначе
    * поле отсутствует (на бэке пустой вектор не сериализуется). Опционально.
    */
   children?: ScanNode[];
+}
+
+/**
+ * Причина кандидатуры на очистку (движок правил v2, план §2.1).
+ * Зеркало Rust-enum `CleanupReason` (src-tauri/src/ipc/contract.rs).
+ * Подписи и тексты-объяснения — в `src/lib/cleanup.ts`.
+ */
+export type CleanupReason =
+  | "packageCache"
+  | "buildArtifact"
+  | "browserCache"
+  | "gpuCache"
+  | "tempDir"
+  | "tempFile"
+  | "interruptedDownload"
+  | "crashDump"
+  | "recycleBin"
+  | "windowsOld"
+  | "installerInDownloads"
+  | "emptyDir"
+  | "staleLarge";
+
+/** Уверенность правила очистки. Зеркало Rust-enum `Confidence`. */
+export type Confidence = "safe" | "likely" | "review";
+
+/** Тройка «правило → уверенность» на узле. Зеркало Rust `CleanupInfo`. */
+export interface CleanupInfo {
+  reason: CleanupReason;
+  confidence: Confidence;
+}
+
+/**
+ * Группа кандидатов одной причины по поддереву — элемент ответа `list_cleanup`.
+ * Зеркало Rust-структуры `CleanupGroup`.
+ */
+export interface CleanupGroup {
+  reason: CleanupReason;
+  confidence: Confidence;
+  /** Число кандидатов причины (вложенные не задваиваются). */
+  count: number;
+  /** Суммарный объём кандидатов причины, байты. */
+  bytes: number;
+  /** Крупнейшие N кандидатов (для списка); остальные — лениво `cleanup_paths`. */
+  topItems: ScanNode[];
+}
+
+/** Лёгкая ссылка на кандидата (для массовой пометки). Зеркало `CleanupItemRef`. */
+export interface CleanupItemRef {
+  path: string;
+  size: number;
+  /** Время модификации, unix-секунды (для фильтра давности при пометке). */
+  mtime: number;
+}
+
+/**
+ * Ответ `current_root` с учётом фоновой загрузки снимка при старте приложения.
+ * Зеркало Rust-структуры `CurrentRoot` (src-tauri/src/ipc/contract.rs).
+ */
+export interface CurrentRoot {
+  /** Снимок ещё читается из SQLite в фоне: корень МОЖЕТ появиться — фронт ждёт
+   *  события `snapshot://ready` (payload: string | null), а не стартует на демо. */
+  loading: boolean;
+  /** Корень дерева либо `null` (окончательно, когда `loading === false`). */
+  root: string | null;
 }
 
 /** Результат удаления файлов в Корзину. Зеркало Rust-структуры `DeleteResult`. */

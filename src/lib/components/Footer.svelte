@@ -49,9 +49,12 @@
   {:else if hidden}
     <HiddenPanel />
   {:else}
+    <!-- Компоновка (план §4): крошки слева (от начала чтения), справа —
+         KPI+полоса заполнения одним блоком (число привязано к полосе);
+         «Легенда» — краем. -->
     <div class="browse">
-      <div class="size"><DiskFillBar summary={$levelSummary} /></div>
       <div class="path"><Breadcrumbs /></div>
+      <div class="size"><DiskFillBar summary={$levelSummary} /></div>
       <button
         class="legend-btn"
         class:on={legend}
@@ -83,19 +86,19 @@
     width: 100%;
     min-width: 0;
   }
-  /* Слева — полоса размера уровня по категориям; занимает левую часть. */
-  .size {
-    flex: 1 1 40%;
-    min-width: 8rem;
-    max-width: 46%;
-  }
-  /* Правее — интерактивный путь (крошки); тянется, при переполнении прячет root. */
+  /* Слева — интерактивный путь (крошки) от начала чтения; тянется. */
   .path {
     flex: 1 1 auto;
     min-width: 0;
     display: flex;
-    justify-content: flex-end;
+    justify-content: flex-start;
     overflow: hidden;
+  }
+  /* Правее — KPI + полоса размера уровня по категориям (одним блоком). */
+  .size {
+    flex: 1 1 44%;
+    min-width: 10rem;
+    max-width: 48%;
   }
   /* Кнопка легенды — прижата к правому краю. */
   .legend-btn {

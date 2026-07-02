@@ -1,0 +1,47 @@
+<!-- Иконка приложения SectorCity (план §6, бренд-марка): тёмная плитка в
+     Nothing/dot-matrix стилистике — фон-«земля» из точек + «полярная звезда»
+     из точек с красным северным лучом (акцент --accent #d71921).
+     Генерация набора иконок: `corepack pnpm tauri icon app-icon.svg`
+     (обновит src-tauri/icons: .ico/.icns/.png). Зеркалит StarGlyph.svelte. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- Dot-grid «земли»: редкая сетка тусклых точек, как в сцене. -->
+    <pattern id="ground" width="64" height="64" patternUnits="userSpaceOnUse">
+      <circle cx="32" cy="32" r="4" fill="#ffffff" opacity="0.07"/>
+    </pattern>
+    <clipPath id="tile">
+      <rect width="512" height="512" rx="112"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#tile)">
+    <rect width="512" height="512" fill="#0a0a0c"/>
+    <rect width="512" height="512" fill="url(#ground)"/>
+    <!-- Едва заметное радиальное «свечение города» в центре. -->
+    <circle cx="256" cy="256" r="230" fill="#ffffff" opacity="0.03"/>
+  </g>
+
+  <!-- Полярная звезда из точек (та же геометрия, что StarGlyph 24×24,
+       смасштабирована в поле 70…442). -->
+  <g fill="#e8e8e8">
+    <circle cx="256" cy="256" r="27"/>
+    <!-- северный луч ниже, отдельным акцентом -->
+    <circle cx="256" cy="153.7" r="18"/>
+    <circle cx="256" cy="200.2" r="14"/>
+    <circle cx="256" cy="311.8" r="14"/>
+    <circle cx="256" cy="358.3" r="18"/>
+    <circle cx="256" cy="404.8" r="20"/>
+    <circle cx="107.2" cy="256" r="20"/>
+    <circle cx="153.7" cy="256" r="18"/>
+    <circle cx="200.2" cy="256" r="14"/>
+    <circle cx="311.8" cy="256" r="14"/>
+    <circle cx="358.3" cy="256" r="18"/>
+    <circle cx="404.8" cy="256" r="20"/>
+    <circle cx="197.1" cy="197.1" r="12"/>
+    <circle cx="314.9" cy="197.1" r="12"/>
+    <circle cx="197.1" cy="314.9" r="12"/>
+    <circle cx="314.9" cy="314.9" r="12"/>
+  </g>
+  <!-- Северный луч — красный акцент бренда. -->
+  <circle cx="256" cy="107.2" r="24" fill="#d71921"/>
+</svg>

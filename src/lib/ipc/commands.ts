@@ -6,7 +6,15 @@
  * реализованы Scanner/Aggregator. Сигнатуры зафиксированы заранее.
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { AggSpec, DeleteResult, ScanNode } from "./contract";
+import type {
+  AggSpec,
+  CleanupGroup,
+  CleanupItemRef,
+  CleanupReason,
+  CurrentRoot,
+  DeleteResult,
+  ScanNode,
+} from "./contract";
 
 /**
  * Запустить скан корня; прогресс приходит событиями `scan://progress`.
@@ -22,10 +30,10 @@ export function cancelScan(): Promise<void> {
 }
 
 /**
- * Корень текущего дерева (загруженного снимка или последнего скана) либо `null`.
- * Фронт по нему строит стартовый уровень без рескана.
+ * Корень текущего дерева (загруженного снимка или последнего скана). Пока снимок
+ * читается в фоне — `loading: true`; тогда фронт ждёт события `snapshot://ready`.
  */
-export function currentRoot(): Promise<string | null> {
+export function currentRoot(): Promise<CurrentRoot> {
   return invoke("current_root");
 }
 
@@ -46,6 +54,21 @@ export function getNodeDetail(path: string): Promise<ScanNode | null> {
 /** Поиск по текущему снимку ФС. */
 export function search(query: string): Promise<ScanNode[]> {
   return invoke("search", { query });
+}
+
+/** Группы кандидатов на очистку по причинам ПО ВСЕМУ ПОДДЕРЕВУ `scope`
+ *  (панель причин сканера мусора). Суффикс `::<other>` бэк срезает сам. */
+export function listCleanup(scope: string): Promise<CleanupGroup[]> {
+  return invoke("list_cleanup", { scope });
+}
+
+/** Все кандидаты одной причины в поддереве `scope` (крупнейшие первыми) —
+ *  для массовой пометки причины целиком (лениво, по запросу). */
+export function cleanupPaths(
+  scope: string,
+  reason: CleanupReason,
+): Promise<CleanupItemRef[]> {
+  return invoke("cleanup_paths", { scope, reason });
 }
 
 /** Переместить файлы/папки в Корзину. */

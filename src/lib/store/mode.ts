@@ -8,7 +8,13 @@
  * (позиция оверлея покадрово) пишется в DOM императивно, в обход стора.
  */
 import { atom, computed } from "nanostores";
-import type { Category, NodeId, ScanNode, ScanProgress } from "../ipc/contract";
+import type {
+  Category,
+  CleanupGroup,
+  NodeId,
+  ScanNode,
+  ScanProgress,
+} from "../ipc/contract";
 
 export type AppMode =
   | { kind: "scanning"; progress: number }
@@ -17,9 +23,10 @@ export type AppMode =
   | { kind: "selected"; path: string; selectedId: NodeId }
   | { kind: "zooming"; from: string; to: string }
   /**
-   * Режим «Умный сканер мусора» (vision §I.7). Верхнеуровневый режим: меняет
-   * семантику клика по зданию-файлу (пометить/снять на снос), drill по районам
-   * сохраняется (нужно ходить по дереву). Набор помеченного вынесен в отдельный
+   * Режим «Умный сканер мусора» (vision §I.7). Верхнеуровневый режим: включает
+   * пометку на снос по Ctrl+ЛКМ (файлы И папки) и через ПКМ-меню; обычный ЛКМ
+   * ведёт себя как в стандартном режиме (карточка/drill) — семантику клика не
+   * ломаем (фидбек пользователя). Набор помеченного вынесен в отдельный
    * атом `markedForCleanup` (как `breadcrumbs`/`hoveredNode`) — частые клики не
    * должны дёргать союз, а пометка переживает навигацию по уровням.
    */
@@ -174,6 +181,13 @@ export const markedForCleanup = atom<Map<string, number>>(new Map());
  * / пересборке уровня; пусто вне режима.
  */
 export const cleanupCandidatesHere = atom<ScanNode[]>([]);
+
+/**
+ * Группы кандидатов по причинам ПО ВСЕМУ ПОДДЕРЕВУ текущего уровня (v2, план
+ * §2.3): питают панель причин сканера. Публикует владелец сцены (Scene) при
+ * входе в режим/смене уровня в режиме (`list_cleanup`); пусто вне режима.
+ */
+export const cleanupGroups = atom<CleanupGroup[]>([]);
 
 /** Помечен ли путь на снос. */
 export function isMarked(path: string): boolean {

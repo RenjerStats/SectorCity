@@ -6,6 +6,7 @@
   import { createScene, type SceneHandle } from "../three/scene";
   import { createNavigator, type CityNavigator } from "../three/navigator";
   import StatusOverlay from "./StatusOverlay.svelte";
+  import StarGlyph from "./StarGlyph.svelte";
   import CategoryEmpty from "./CategoryEmpty.svelte";
   import NodeCard from "./NodeCard.svelte";
   import ContextMenu from "./ContextMenu.svelte";
@@ -19,6 +20,7 @@
     cancelScan,
     currentRoot,
     search,
+    listCleanup,
   } from "../ipc/commands";
   import { revealInExplorer, copyPath } from "../ipc/actions";
   import { baseName } from "../format";
@@ -38,6 +40,7 @@
     toggleMark,
     clearMarks,
     cleanupCandidatesHere,
+    cleanupGroups,
     categoryFilter,
     categoryFilterActive,
     categoryFilterEmpty,
@@ -82,6 +85,9 @@
   // Позицию ставим императивно покадрово; контент — реактивно из сторов.
   let cardEl = $state<HTMLDivElement | undefined>(undefined);
   let hoverEl = $state<HTMLDivElement | undefined>(undefined);
+  // Компас-«полярная звезда» (план §6): вращающаяся часть. Угол пишется
+  // ИМПЕРАТИВНО покадрово (высокочастотное из камеры — в обход стора, docs §1).
+  let compassRotEl = $state<HTMLSpanElement | undefined>(undefined);
   // Контекстное меню ПКМ (vision §I.10): узел под курсором + позиция, либо null.
   // Низкочастотно (по клику) — обычный $state, как selectedNode; рендерится в DOM.
   let contextMenu = $state<{
@@ -100,7 +106,13 @@
 
   // Состояние центрального оверлея (приветствие/пусто/ошибка/отмена). Низко-
   // частотное — обычный $state; "none" = город виден, оверлей не рисуется.
-  type StatusKind = "welcome" | "empty" | "error" | "cancelled" | "none";
+  type StatusKind =
+    | "loading"
+    | "welcome"
+    | "empty"
+    | "error"
+    | "cancelled"
+    | "none";
   let statusKind = $state<StatusKind>("none");
   let statusErrors = $state(0);
   let currentUnfilteredNodes = $state<ScanNode[]>([]);
@@ -232,6 +244,18 @@
     return true;
   };
 
+  /** Обновить группы причин очистки по поддереву уровня `path` (панель v2).
+   *  Гонку навигаций гасим сверкой актуальности пути на приходе ответа. */
+  async function refreshCleanupGroups(path: string) {
+    try {
+      const groups = await listCleanup(path);
+      const m = appMode.get();
+      if (m.kind === "cleanup" && m.path === path) cleanupGroups.set(groups);
+    } catch (err) {
+      console.warn("list_cleanup не удался:", err);
+    }
+  }
+
   /** Войти в режим сканера мусора: переключить семантику клика и облик сцены. */
   function enterCleanup() {
     const crumbs = $breadcrumbs;
@@ -240,12 +264,14 @@
     hoveredNode.set(null);
     appMode.set({ kind: "cleanup", path });
     nav?.setCleanup({ isMarked: isMarkedFn, isCandidate: isCandidateFn });
+    // Группы причин подтянет подписчик appMode (см. offCleanupGroups в onMount).
   }
 
   /** Выйти из режима: снять облик/пометки и вернуться в обычный Обзор. */
   function exitCleanup() {
     const path = $appMode.kind === "cleanup" ? $appMode.path : "";
     nav?.setCleanup(null);
+    cleanupGroups.set([]);
     clearMarks();
     // Сбросить фильтры кандидатов при выходе из режима очистки
     candidateFilter.set({
@@ -319,6 +345,9 @@
     interaction?.clearHover();
     setSummary(nodes, path);
     updateFilterEmpty(nodes);
+    // После сноса/пересборки в режиме очистки панель причин должна отражать
+    // новое дерево (удалённые кандидаты исчезают из групп).
+    if (appMode.get().kind === "cleanup") void refreshCleanupGroups(path);
   }
 
   /** Запланировать пересборку с дебаунсом — «на лету», но без холостых пересчётов
@@ -368,10 +397,14 @@
       // Клик по файлу → карточка над зданием; клик мимо/по «Прочее» → null.
       // Режим (appMode) не трогаем: карточка живёт на отдельном атоме, как hover.
       onSelect: (node) => selectedNode.set(node),
-      // Семантика клика в режиме сканера мусора: пометить/снять файл на снос.
+      // Режим сканера мусора: Ctrl+ЛКМ — пометить/снять узел на снос (и файл,
+      // и папку). Обычный ЛКМ — как в стандартном режиме (карточка/drill).
+      // Системные (locked) и синтетическую «Мелочь» (aggregated, нет реального
+      // пути) не помечаем.
       isCleanup: () => appMode.get().kind === "cleanup",
       onMark: (node) => {
-        if (node.flags.includes("locked")) return;
+        if (node.flags.includes("locked") || node.flags.includes("aggregated"))
+          return;
         toggleMark(node.path, node.size);
       },
       // ПКМ → контекстное меню (vision §I.10). Клик мимо зданий (info=null) —
@@ -414,6 +447,19 @@
       // cardEl — полное окно по якорю выбранного; hoverEl — мини по наведённому.
       place(cardEl, interaction.selectionAnchor());
       place(hoverEl, interaction.hoverAnchor());
+    });
+
+    // Компас: угол = азимут камеры вокруг цели (0 — взгляд на север, т.е. в −Z:
+    // верх treemap-карты). Вращаем DOM императивно покадрово; глиф при этом
+    // всегда указывает северным лучом на север МИРА (раскладка детерминирована →
+    // север постоянен → пространственная память, план §6).
+    const offCompass = handle.onFrame(() => {
+      if (!compassRotEl || !handle) return;
+      const t = handle.cameraTarget();
+      const dx = handle.camera.position.x - t.x;
+      const dz = handle.camera.position.z - t.z;
+      const deg = (Math.atan2(dx, dz) * 180) / Math.PI;
+      compassRotEl.style.transform = `rotate(${deg}deg)`;
     });
 
     // Клавиатура (Esc-стек, drill/свойства, действия над узлом) централизована в
@@ -553,6 +599,20 @@
       }
     });
 
+    // Режим очистки: смена уровня В режиме (drill/крошки/поиск) обновляет группы
+    // причин по новому поддереву. Вход в режим ловится этим же подписчиком.
+    let lastCleanupPath: string | null = null;
+    const offCleanupGroups = appMode.subscribe((m) => {
+      if (m.kind === "cleanup") {
+        if (m.path !== lastCleanupPath) {
+          lastCleanupPath = m.path;
+          void refreshCleanupGroups(m.path);
+        }
+      } else if (m.kind !== "zooming") {
+        lastCleanupPath = null; // выход из режима (zooming — транзит, не сброс)
+      }
+    });
+
     // Пометка на снос изменилась → перекрасить облик очистки на лету (красный/дим).
     // Зовём navigator только в режиме cleanup; вне его — это no-op облика.
     const offMarks = markedForCleanup.subscribe(() => {
@@ -578,29 +638,97 @@
     // его без рескана, иначе показываем мок верхнего уровня (корень "" → бэк отдаёт
     // мок) с приветствием. Восстановление отключается в настройках (вкладка
     // «Сохранение»); тогда даже при наличии снимка стартуем на демо-городе.
+    //
+    // Снимок бэк читает В ФОНЕ (план §1.1): `currentRoot` может ответить
+    // `loading: true` — тогда показываем «загружаю снимок…» и ждём события
+    // `snapshot://ready` (его слушатель ставим ДО запроса, чтобы событие не
+    // проскочило в щель между ответом и подпиской). `started` гасит двойной
+    // вход (ответ с готовым корнем + догнавшее событие).
     appMode.set({ kind: "scanning", progress: 0 });
-    const rootPromise = restoreLastScan.get()
-      ? currentRoot()
-      : Promise.resolve(null);
-    rootPromise
-      .then(async (root) => {
+    let started = false;
+    let snapUnlisten: UnlistenFn | undefined;
+    /** Однократная стартовая инициализация: построить уровень по корню (`null` —
+     *  демо + приветствие), прекомпилировать шейдеры (§1.2) и снять оверлей. */
+    async function startWith(root: string | null): Promise<void> {
+      if (started) return;
+      started = true;
+      try {
         const target = root ?? "";
+        // Замер §1.2: первый buildCity + compileAsync + первый кадр города —
+        // смотреть в devtools Performance (marks) или в консоли.
+        performance.mark("sc:first-build:start");
         await loadRoot(target);
+        performance.mark("sc:first-build:end");
+        performance.measure(
+          "sc:first-build",
+          "sc:first-build:start",
+          "sc:first-build:end",
+        );
+        // Прекомпиляция шейдеров (transmission-купола + PMREM) ДО снятия оверлея:
+        // иначе их синхронная сборка на первом кадре города даёт jank (§1.2).
+        await handle?.compile();
+        performance.mark("sc:first-compile:end");
+        performance.measure(
+          "sc:first-compile",
+          "sc:first-build:end",
+          "sc:first-compile:end",
+        );
+        const offFirstFrame = handle?.onFrame(() => {
+          offFirstFrame?.();
+          performance.mark("sc:first-frame");
+          performance.measure(
+            "sc:first-frame-after-build",
+            "sc:first-compile:end",
+            "sc:first-frame",
+          );
+          const ms = (name: string) =>
+            performance.getEntriesByName(name)[0]?.duration.toFixed(0) ?? "?";
+          console.info(
+            `[perf] первый уровень: build ${ms("sc:first-build")}мс, ` +
+              `compile ${ms("sc:first-compile")}мс, ` +
+              `кадр ${ms("sc:first-frame-after-build")}мс`,
+          );
+        });
         breadcrumbs.set([{ path: target, name: crumbName(target) }]);
         appMode.set({ kind: "idle", path: target });
         // Нет снимка прошлого скана → за демо-городом показываем приветствие
         // с приглашением выбрать реальную папку; после скана оно скрывается.
         statusKind = root === null ? "welcome" : "none";
-      })
-      .catch((err) => {
+      } catch (err) {
         console.warn("стартовый уровень недоступен:", err);
         appMode.set({ kind: "idle", path: "" });
         statusKind = "welcome";
-      });
+      }
+    }
+    if (!restoreLastScan.get()) {
+      void startWith(null);
+    } else {
+      listen<string | null>("snapshot://ready", (e) => {
+        void startWith(e.payload);
+      })
+        .then((un) => {
+          snapUnlisten = un;
+          return currentRoot();
+        })
+        .then((cur) => {
+          if (cur.loading) {
+            statusKind = "loading"; // корень появится с событием snapshot://ready
+            return;
+          }
+          void startWith(cur.root);
+        })
+        .catch((err) => {
+          // Вне Tauri (чистый vite) ни событий, ни IPC — стартуем на демо.
+          console.warn("стартовый корень недоступен:", err);
+          void startWith(null);
+        });
+    }
 
     return () => {
+      snapUnlisten?.();
       offLod();
       offCard();
+      offCompass();
       offFilter();
       offSearch();
       offSearchIpc();
@@ -609,6 +737,7 @@
       offShowAgg();
       offHidden();
       offAgg();
+      offCleanupGroups();
       offMarks();
       if (aggTimer) clearTimeout(aggTimer);
       offCmd();
@@ -645,6 +774,9 @@
       const completed = await startScan(root);
       if (completed) {
         const count = await loadRoot(root);
+        // Свежепостроенный город = свежие материалы: прекомпилировать шейдеры до
+        // снятия прогресс-панели, чтобы первый кадр не собирал их синхронно (§1.2).
+        await handle?.compile();
         breadcrumbs.set([{ path: root, name: crumbName(root) }]);
         appMode.set({ kind: "idle", path: root });
         // Пустой корень (нет файлов) → оверлей «папка пуста», иначе город виден.
@@ -756,8 +888,14 @@
   function cancel() {
     void cancelScan();
   }
+  /** Длительность плавного возврата камеры к обзорному ракурсу (компас). */
+  const RESET_VIEW_MS = 600;
+
+  /** «Сбросить вид» (клик по компасу / команда / хоткей): плавный твин к
+   *  исходному обзорному ракурсу (север сверху). Во время зума — no-op. */
   function resetView() {
-    handle?.resetView();
+    if ($appMode.kind === "zooming") return;
+    handle?.resetView(RESET_VIEW_MS);
   }
 
   /** На уровень вверх (хоткей Backspace / Alt+←): прыжок на предпоследнюю крошку.
@@ -945,6 +1083,20 @@
   <!-- Плашка пустоты категорийного фильтра -->
   <CategoryEmpty />
 
+  <!-- Компас-«полярная звезда» (план §6): показывает север карты, вращается с
+       орбитой камеры (императивно, onFrame); клик — плавный «Сбросить вид»
+       (заменил одноимённую кнопку в шапке). -->
+  <button
+    class="compass"
+    title="Сбросить вид — камера плавно вернётся к обзору (север сверху)"
+    aria-label="Сбросить вид"
+    onclick={resetView}
+  >
+    <span class="compass-rot" bind:this={compassRotEl}>
+      <StarGlyph size={30} />
+    </span>
+  </button>
+
   <!-- Единое окно над зданием: компактный hover-вид разворачивается по клику в
        полную карточку (docs §I.9). Узел — выбранный, иначе наведённый; режим
        `expanded` = есть выбор. Обёртку позиционируем императивно покадрово (см.
@@ -1017,6 +1169,36 @@
     width: 100%;
     height: 100%;
   }
+  /* Компас в углу сцены: круглая матовая кнопка, вращается только внутренний
+     глиф (не трогаем layout-трансформ кнопки). */
+  .compass {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 46px;
+    padding: 0;
+    background: var(--overlay);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    cursor: pointer;
+    transition: border-color var(--motion-micro) var(--ease-out);
+  }
+  .compass:hover {
+    border-color: var(--accent);
+  }
+  .compass-rot {
+    display: block;
+    line-height: 0;
+    will-change: transform;
+  }
+
   .card-anchor {
     position: absolute;
     top: 0;
