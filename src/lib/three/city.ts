@@ -932,7 +932,7 @@ function makeDomeMaterial(
       // Определяем цвет свечения: сиреневый для папки "Мелочь" (aggregated) на основе расстояния до её центра в XZ
       const distXZ = positionWorld.xz.distance(aggregatedFolderPos.xz);
       const isAgg = aggregatedFolderRadius.sub(distXZ).clamp(0, 1).sign();
-      const glowColor = isAgg.mix(tslColor(0x0088ff), tslColor(0x8b7df0));
+      const glowColor = isAgg.mix(tslColor(0x0088ff), tslColor(0xc580ff));
       
       // 1. Краевой неоновый контур (Френель) — интенсивность 0.2
       const fresnel = float(1.0).sub(normalView.z.clamp(0, 1)).pow(3.5);
