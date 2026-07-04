@@ -86,7 +86,8 @@ import { layoutToWorld, type TreemapRect } from "./layoutToWorld";
 import { quality } from "./quality";
 
 export const aggregatedFolderPos = uniform(new Vector3(99999, 99999, 99999));
-export const aggregatedFolderRadius = uniform(0);
+export const aggregatedFolderHalfW = uniform(0);
+export const aggregatedFolderHalfD = uniform(0);
 
 /** Каноническая сторона уровня-владельца (мировые единицы): бо́льшая сторона. */
 export const CITY_SPAN = 200;
@@ -929,9 +930,12 @@ function makeDomeMaterial(
     if (quality.active.backend === "webgpu") {
       const tsl = TSL as any;
       
-      // Определяем цвет свечения: сиреневый для папки "Мелочь" (aggregated) на основе расстояния до её центра в XZ
-      const distXZ = positionWorld.xz.distance(aggregatedFolderPos.xz);
-      const isAgg = aggregatedFolderRadius.sub(distXZ).clamp(0, 1).sign();
+      // Точная проверка попадания точки XZ в прямоугольные границы папки "Мелочь"
+      const diffX = positionWorld.x.sub(aggregatedFolderPos.x).abs();
+      const diffZ = positionWorld.z.sub(aggregatedFolderPos.z).abs();
+      const inX = aggregatedFolderHalfW.sub(diffX).clamp(0, 1).sign();
+      const inZ = aggregatedFolderHalfD.sub(diffZ).clamp(0, 1).sign();
+      const isAgg = inX.mul(inZ); // 1.0 внутри прямоугольника, 0.0 снаружи
       const glowColor = isAgg.mix(tslColor(0x0088ff), tslColor(0xc580ff));
       
       // 1. Краевой неоновый контур (Френель) — интенсивность 0.2
@@ -1112,18 +1116,19 @@ export function buildLevel(
   const nowSeconds = Math.floor(Date.now() / 1000);
   const { districts, buildings } = layoutNested(nodes, span, nowSeconds);
 
-  // Обновляем позицию и радиус папки "Мелочь" для шейдера купола WebGPU
+  // Обновляем позицию и точные габариты папки "Мелочь" для шейдера купола WebGPU
   const aggDistrict = districts.find((d) => d.node.flags.includes("aggregated"));
   if (aggDistrict) {
     const full = layoutToWorld(aggDistrict.rect, 0);
     const dw = Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2);
     const dd = Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2);
-    const radius = Math.sqrt(dw * dw + dd * dd) / 2 + 3.0;
     aggregatedFolderPos.value.set(full.centerX, 0, full.centerZ);
-    aggregatedFolderRadius.value = radius;
+    aggregatedFolderHalfW.value = dw / 2 + 0.5; // небольшой запас в 0.5 единицы на сглаживание
+    aggregatedFolderHalfD.value = dd / 2 + 0.5;
   } else {
     aggregatedFolderPos.value.set(99999, 99999, 99999);
-    aggregatedFolderRadius.value = 0;
+    aggregatedFolderHalfW.value = 0;
+    aggregatedFolderHalfD.value = 0;
   }
 
   // Земля — большой матовый «апрон» вокруг города с радиальным угасанием цвета к
