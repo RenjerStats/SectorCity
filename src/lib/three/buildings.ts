@@ -421,11 +421,117 @@ const BUILDERS: Record<Category, () => BuildingDef> = {
   binary: makeBinary,
 };
 
+function getCategoryMaterials(category: Category): Material[] {
+  switch (category) {
+    case "other":
+      return [plastic(BODY_TINT.other), crownMat("other")];
+    case "code":
+      return [
+        plastic(BODY_TINT.code),
+        glass(),
+        crownMat("code"),
+        crownDarkMat("code"),
+      ];
+    case "document":
+      return [
+        plastic(BODY_TINT.document),
+        crownDarkMat("document"),
+        crownMat("document"),
+        plastic(EDGE_COLOR),
+      ];
+    case "image":
+      return [
+        plastic(BODY_TINT.image),
+        crownMat("image"),
+        plastic(WOOD_COLOR),
+        glass(),
+      ];
+    case "video":
+      return [
+        plastic(BODY_TINT.video),
+        crownMat("video"),
+        crownDarkMat("video"),
+        plastic(EDGE_COLOR),
+      ];
+    case "audio":
+      return [
+        plastic(BODY_TINT.audio),
+        plastic(FIN_COLOR),
+        crownMat("audio"),
+        crownDarkMat("audio"),
+        steel(),
+      ];
+    case "archive":
+      return [
+        plastic(BODY_TINT.archive),
+        crownMat("archive"),
+        steel(),
+      ];
+    case "binary":
+      return [
+        plastic(BODY_TINT.binary),
+        crownMat("binary"),
+        steel(),
+        glass(),
+      ];
+  }
+}
+
+interface CachedDef {
+  geometry: BufferGeometry;
+  designedColors: Color[];
+}
+
+const geometryCache: Partial<Record<Category, CachedDef>> = {};
+let cachedQualityKey = "";
+
+function getQualityKey(): string {
+  return `${quality.active.backend}_${quality.active.pbr}_${quality.active.roundSegments}`;
+}
+
 /**
  * Построить уникальный `BuildingDef` для категории. Владелец (`city.ts`) кладёт
  * геометрию+материалы в `InstancedMesh` и обязан вызвать `dispose` геометрии и
  * каждого материала на смене уровня (tech §5.5; `disposeGroup` уже умеет массив).
  */
 export function makeBuildingDef(category: Category): BuildingDef {
-  return BUILDERS[category]();
+  const currentKey = getQualityKey();
+  if (currentKey !== cachedQualityKey) {
+    // При смене качества очищаем кэш геометрий
+    for (const cat of Object.keys(geometryCache) as Category[]) {
+      const entry = geometryCache[cat];
+      if (entry) {
+        entry.geometry.dispose();
+      }
+    }
+    for (const key of Object.keys(geometryCache)) {
+      delete geometryCache[key as Category];
+    }
+    cachedQualityKey = currentKey;
+  }
+
+  let entry = geometryCache[category];
+  if (!entry) {
+    const rawDef = BUILDERS[category]();
+    // Материалы из тестового запуска не нужны — удаляем
+    rawDef.materials.forEach((m) => m.dispose());
+    
+    // Помечаем геометрию как кэшированную, чтобы disposeGroup её не уничтожил
+    (rawDef.geometry as any).isCached = true;
+    
+    entry = {
+      geometry: rawDef.geometry,
+      designedColors: rawDef.designedColors,
+    };
+    geometryCache[category] = entry;
+  }
+
+  // Создаем свежие копии материалов для этого уровня
+  const materials = getCategoryMaterials(category);
+
+  return {
+    geometry: entry.geometry,
+    materials,
+    designedColors: entry.designedColors,
+  };
 }

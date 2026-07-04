@@ -64,7 +64,13 @@ import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeom
 // Node-ветка three — ТОЛЬКО для WebGPU-бэкенда (полуотражающий пол): статический
 // импорт не дороже, чем есть (Scene.svelte и так статически тянет scene.webgpu).
 import { MeshBasicNodeMaterial } from "three/webgpu";
-import { attribute, color as tslColor, float, reflector } from "three/tsl";
+import { attribute, color as tslColor, float, reflector, positionWorld, vec3, normalView } from "three/tsl";
+import * as TSL from "three/tsl";
+import {
+  cursorLightColor,
+  cursorLightIntensity,
+  cursorLightPos,
+} from "./cursor-light-shared";
 import { hierarchy, treemap, treemapSquarify } from "d3-hierarchy";
 import type { Category, ScanNode } from "../ipc/contract";
 import {
@@ -236,6 +242,8 @@ export interface CityView {
   updateLOD(camera: Camera): void;
   /** Меши, по которым идёт raycast (купола-папки + здания-файлы). */
   pickMeshes(): InstancedMesh[];
+  /** Возвращает все геометрические меши уровня (для рейкаста указки). */
+  allVisualMeshes(): InstancedMesh[];
   /** Разрешить попадание (меш+инстанс) в узел/цель-drill, либо `null`. */
   resolvePick(mesh: Object3D, instanceId: number): PickInfo | null;
   /**
@@ -748,7 +756,7 @@ function makeRoundedUnitCube(): RoundedBoxGeometry {
 
 /** Единичный скруглённый куб купола — общий для инстанс-меша и анимируемых «роёв». */
 function makeDomeGeometry(): RoundedBoxGeometry {
-  return makeRoundedUnitCube();
+  return getCachedDomeGeometry();
 }
 
 /** Объёмное поглощение стекла (glassExtras): холодный тинт, набираемый в толще. */
@@ -775,6 +783,112 @@ const GLASS_DISPERSION = 0.35;
  * Возвращаемый тип — объединение: оба класса несут `.color`/`.opacity`, чего
  * достаточно вызывающим (`applyDomeProgress`, decor-dim, per-instance тинт).
  */
+// Кэш материалов стеклянных куполов для предотвращения рантайм-компиляции шейдеров при drill/up
+let cachedStaticMaterial: MeshPhysicalMaterial | MeshLambertMaterial | null = null;
+let cachedFlightMaterialSingle: MeshPhysicalMaterial | MeshLambertMaterial | null = null;
+let cachedFlightMaterialInstanced: MeshPhysicalMaterial | MeshLambertMaterial | null = null;
+let cachedQualityKey = "";
+
+function getQualityKey(): string {
+  return `${quality.active.backend}_${quality.active.frostedGlass}_${quality.active.glassExtras}`;
+}
+
+function getCachedDomeMaterial(type: "static" | "flightSingle" | "flightInstanced"): MeshPhysicalMaterial | MeshLambertMaterial {
+  const currentKey = getQualityKey();
+  if (currentKey !== cachedQualityKey) {
+    if (cachedStaticMaterial) {
+      (cachedStaticMaterial as any).isCached = false;
+      cachedStaticMaterial.dispose();
+      cachedStaticMaterial = null;
+    }
+    if (cachedFlightMaterialSingle) {
+      (cachedFlightMaterialSingle as any).isCached = false;
+      cachedFlightMaterialSingle.dispose();
+      cachedFlightMaterialSingle = null;
+    }
+    if (cachedFlightMaterialInstanced) {
+      (cachedFlightMaterialInstanced as any).isCached = false;
+      cachedFlightMaterialInstanced.dispose();
+      cachedFlightMaterialInstanced = null;
+    }
+    cachedQualityKey = currentKey;
+  }
+
+  if (type === "static") {
+    if (!cachedStaticMaterial) {
+      cachedStaticMaterial = makeDomeMaterial(false);
+      (cachedStaticMaterial as any).isCached = true;
+    }
+    return cachedStaticMaterial;
+  } else if (type === "flightSingle") {
+    if (!cachedFlightMaterialSingle) {
+      cachedFlightMaterialSingle = makeDomeMaterial(true);
+      (cachedFlightMaterialSingle as any).isCached = true;
+    }
+    return cachedFlightMaterialSingle;
+  } else {
+    if (!cachedFlightMaterialInstanced) {
+      cachedFlightMaterialInstanced = makeDomeMaterial(true);
+      (cachedFlightMaterialInstanced as any).isCached = true;
+    }
+    return cachedFlightMaterialInstanced;
+  }
+}
+
+let cachedDomeGeometry: RoundedBoxGeometry | null = null;
+let cachedDomeGeoQualityKey = "";
+
+function getCachedDomeGeometry(): RoundedBoxGeometry {
+  const currentKey = `${quality.active.roundSegments}`;
+  if (currentKey !== cachedDomeGeoQualityKey) {
+    if (cachedDomeGeometry) {
+      cachedDomeGeometry.dispose();
+      cachedDomeGeometry = null;
+    }
+    cachedDomeGeoQualityKey = currentKey;
+  }
+  if (!cachedDomeGeometry) {
+    cachedDomeGeometry = makeRoundedUnitCube();
+    (cachedDomeGeometry as any).isCached = true;
+  }
+  return cachedDomeGeometry;
+}
+
+let cachedBaseMetalMaterial: MeshPhysicalMaterial | MeshStandardMaterial | MeshLambertMaterial | null = null;
+let cachedBaseMatteMaterial: MeshStandardMaterial | MeshLambertMaterial | null = null;
+let cachedBaseQualityKey = "";
+
+function getCachedBaseMaterial(metal: boolean): MeshStandardMaterial | MeshPhysicalMaterial | MeshLambertMaterial {
+  const currentKey = `${quality.active.backend}_${quality.active.pbr}_${quality.active.glassExtras}`;
+  if (currentKey !== cachedBaseQualityKey) {
+    if (cachedBaseMetalMaterial) {
+      (cachedBaseMetalMaterial as any).isCached = false;
+      cachedBaseMetalMaterial.dispose();
+      cachedBaseMetalMaterial = null;
+    }
+    if (cachedBaseMatteMaterial) {
+      (cachedBaseMatteMaterial as any).isCached = false;
+      cachedBaseMatteMaterial.dispose();
+      cachedBaseMatteMaterial = null;
+    }
+    cachedBaseQualityKey = currentKey;
+  }
+
+  if (metal) {
+    if (!cachedBaseMetalMaterial) {
+      cachedBaseMetalMaterial = makeBaseMaterial(true);
+      (cachedBaseMetalMaterial as any).isCached = true;
+    }
+    return cachedBaseMetalMaterial;
+  } else {
+    if (!cachedBaseMatteMaterial) {
+      cachedBaseMatteMaterial = makeBaseMaterial(false);
+      (cachedBaseMatteMaterial as any).isCached = true;
+    }
+    return cachedBaseMatteMaterial;
+  }
+}
+
 function makeDomeMaterial(
   flight: boolean,
 ): MeshPhysicalMaterial | MeshLambertMaterial {
@@ -808,6 +922,21 @@ function makeDomeMaterial(
       mat.clearcoat = 0.5;
       mat.clearcoatRoughness = 0.3;
       mat.dispersion = GLASS_DISPERSION;
+    }
+    if (quality.active.backend === "webgpu") {
+      const tsl = TSL as any;
+      
+      // 1. Синий краевой неоновый контур (Френель) — интенсивность 0.2
+      const fresnel = float(1.0).sub(normalView.z.clamp(0, 1)).pow(3.5);
+      const fresnelGlow = fresnel.mul(tslColor(0x0088ff)).mul(0.2);
+      
+      // 2. Движущаяся волна цифрового сканирования по высоте купола (синяя, без масок и фильтров)
+      const scanY = tsl.positionLocal.y.add(tsl.time.mul(0.15)).mul(12.0);
+      const scanWave = scanY.sin().smoothstep(0.9, 0.98);
+      const scanline = tslColor(0x0088ff).mul(scanWave).mul(0.08);
+      
+      // Объединяем эффекты
+      (mat as any).emissiveNode = fresnelGlow.add(scanline);
     }
     if (flight) mat.color.set(GLASS_COLOR);
     return mat;
@@ -920,7 +1049,7 @@ export function createDomeFlight(
   // прозрачность общая (`material.opacity`), различается лишь подъём по Y — это идеально
   // ложится на инстансинг (1 draw call, 1 дорогой transmission-материал вместо N).
   const geometry = makeDomeGeometry();
-  const material = makeDomeMaterial(true);
+  const material = getCachedDomeMaterial("flightInstanced");
   const mesh = new InstancedMesh(geometry, material, descs.length);
   mesh.renderOrder = 3; // поверх непрозрачных, как и обычный купол
   mesh.frustumCulled = false; // инстансы едут вверх — bbox не пересоберём покадрово
@@ -947,7 +1076,7 @@ export function createDomeFlight(
     },
     dispose() {
       geometry.dispose();
-      material.dispose();
+      if (!(material as any).isCached) material.dispose();
       group.clear();
       group.parent?.remove(group);
     },
@@ -1102,7 +1231,7 @@ export function buildLevel(
     // держится тем, что домики внутри попадают в transmission-буфер ДО купола.
     domeMesh = new InstancedMesh(
       makeDomeGeometry(),
-      makeDomeMaterial(false),
+      getCachedDomeMaterial("static"),
       districts.length,
     );
     domeMesh.renderOrder = 2; // после непрозрачных (здания/плиты)
@@ -1110,16 +1239,16 @@ export function buildLevel(
     // углов). Металл (+1/+2) виден за счёт отражений env-map (см. scene.ts); на
     // минимальном уровне — дешёвый матовый Lambert (см. makeBaseMaterial).
     baseMesh = new InstancedMesh(
-      makeRoundedUnitCube(),
-      makeBaseMaterial(true),
+      getCachedDomeGeometry(),
+      getCachedBaseMaterial(true),
       districts.length,
     );
     baseMesh.castShadow = shadows;
     baseMesh.receiveShadow = shadows;
     // Матовая плита вложенных папок +3 (без металлики) — глубинная детализация.
     baseMatteMesh = new InstancedMesh(
-      makeRoundedUnitCube(),
-      makeBaseMaterial(false),
+      getCachedDomeGeometry(),
+      getCachedBaseMaterial(false),
       districts.length,
     );
     baseMatteMesh.castShadow = shadows;
@@ -1240,6 +1369,14 @@ export function buildLevel(
       if (baseMatteMesh) out.push(baseMatteMesh); // плиты-постаменты +3
       return out;
     },
+    allVisualMeshes() {
+      const out: InstancedMesh[] = [];
+      for (const g of buildGroups) out.push(g.mesh);
+      if (domeMesh) out.push(domeMesh);
+      if (baseMesh) out.push(baseMesh);
+      if (baseMatteMesh) out.push(baseMatteMesh);
+      return out;
+    },
     resolvePick(mesh, instanceId) {
       const bg = buildGroupByMesh.get(mesh as InstancedMesh);
       if (bg) return bg.pick[instanceId] ?? null;
@@ -1258,6 +1395,7 @@ export function buildLevel(
       return true; // купола/плиты — обычные цели пикинга
     },
   };
+  group.userData.view = view;
 
   /** Затемнить общий material меша до фактора `f` (per-instance цвета сохраняются):
    *  `f=1` — полный цвет, ниже — к фону. Фейд декора — через этот множитель, без
@@ -1381,7 +1519,7 @@ export function buildLevel(
     domeMesh.instanceMatrix.needsUpdate = true;
 
     // Отдельный полупрозрачный купол (материал/геометрия — общие, см. makeDome*).
-    const mat = makeDomeMaterial(true);
+    const mat = getCachedDomeMaterial("flightSingle");
     const mesh = new Mesh(makeDomeGeometry(), mat);
     // domeReal[j] — чистое подобие (scale+translate, без вращений): берём прямо из
     // элементов матрицы, не раскладывая её.
@@ -1399,7 +1537,7 @@ export function buildLevel(
       dispose() {
         group.remove(mesh);
         mesh.geometry.dispose();
-        mat.dispose();
+        if (!(mat as any).isCached) mat.dispose();
       },
     };
   }
@@ -1594,7 +1732,7 @@ const GROUND_REFLECT = 0.16;
  * не то): затемнение статично относительно центра земли, как на WebGL-уровнях,
  * просто жёстче и гарантированно до конца.
  */
-const GROUND_VIGNETTE_FULL = 0.75;
+const GROUND_VIGNETTE_FULL = 0.825;
 
 /**
  * Земля-«апрон»: большой матовый план вокруг города (×GROUND_APRON), цвет
@@ -1656,8 +1794,30 @@ function makeFadedGround(span: LevelSpan): Mesh {
       GROUND_VIGNETTE_FULL,
     );
     const reflNode = reflector({ resolutionScale: 0.5 });
-    mat.colorNode = attribute("color", "vec3")
-      .add(reflNode.rgb.mul(float(GROUND_REFLECT)))
+
+    // Расчет точечного освещения от указки (PointLight) на плоскости пола
+    const N = vec3(0, 1, 0); // нормаль плоского пола (вверх по Y в мире после поворота)
+    const lightVec = cursorLightPos.sub(positionWorld);
+    const dist = lightVec.length();
+    const L = lightVec.normalize();
+    const dotNL = N.dot(L).clamp(0, 1);
+
+    // Затухание под радиус действия 75 единиц
+    const range = float(75);
+    const ratio = dist.div(range).clamp(0, 1);
+    const attenuation = float(1).sub(ratio).pow(2); // квадратичное затухание
+
+    // Вклад указки: цвет * интенсивность * угол * затухание * масштабирование яркости
+    const lightContrib = cursorLightColor
+      .mul(cursorLightIntensity)
+      .mul(dotNL)
+      .mul(attenuation)
+      .mul(float(0.0025));
+
+    const baseColor = attribute("color", "vec3").add(reflNode.rgb.mul(float(GROUND_REFLECT)));
+    const litBaseColor = baseColor.add(lightContrib);
+
+    mat.colorNode = litBaseColor
       .mul(toBg.oneMinus())
       .add(tslColor(GROUND_EDGE_COLOR).mul(toBg));
     material = mat;
@@ -1670,6 +1830,7 @@ function makeFadedGround(span: LevelSpan): Mesh {
     material = new MeshLambertMaterial({ vertexColors: true });
     ground = new Mesh(geo, material);
   }
+  ground.name = "ground";
   ground.rotation.x = -Math.PI / 2; // в плоскость XZ
   ground.position.y = -0.3; // чуть ниже основания зданий и подиума
   return ground;
@@ -1746,6 +1907,7 @@ function makeDotMesh(dots: DotSpec[], span: LevelSpan): InstancedMesh {
 /** Освободить GPU-ресурсы группы (geometry/material/текстуры) и очистить её. */
 function disposeGroup(group: Group): void {
   const disposeMat = (m: Material): void => {
+    if ((m as any).isCached) return;
     const tex = (m as MeshLambertMaterial).map;
     if (tex) tex.dispose(); // текстура земли (dot-grid)
     m.dispose();
@@ -1757,7 +1919,9 @@ function disposeGroup(group: Group): void {
       child.userData.disposeExtra();
     }
     if (child instanceof InstancedMesh || child instanceof Mesh) {
-      child.geometry.dispose();
+      if (!(child.geometry as any).isCached) {
+        child.geometry.dispose();
+      }
       const mat = child.material;
       if (Array.isArray(mat)) mat.forEach(disposeMat);
       else disposeMat(mat);

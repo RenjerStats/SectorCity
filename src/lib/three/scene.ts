@@ -13,13 +13,19 @@ import {
   AmbientLight,
   Color,
   DirectionalLight,
+  DoubleSide,
   Group,
   HalfFloatType,
+  InstancedMesh,
+  Mesh,
+  MeshLambertMaterial,
+  MeshPhysicalMaterial,
   type Object3D,
   PCFShadowMap,
   PerspectiveCamera,
   PMREMGenerator,
   Scene,
+  SphereGeometry,
   Vector2,
   Vector3,
   VSMShadowMap,
@@ -36,6 +42,7 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { Easing, Group as TweenGroup, Tween } from "@tweenjs/tween.js";
 import { INITIAL_CAMERA_POS, INITIAL_TARGET } from "./home";
 import { quality } from "./quality";
+import { makeBuildingDef } from "./buildings";
 
 /** Ручка управления сценой для владельца (Svelte-компонента) и слоёв. */
 export interface SceneHandle {
@@ -537,12 +544,94 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
       };
     },
     async compile() {
-      // Ошибку компиляции глотаем: без прекомпиляции шейдеры соберутся синхронно
-      // на первом кадре (медленнее, но корректно) — падать из-за этого не надо.
+      // Создаем геометрию и материалы для «прогрева» кэша.
+      // Нам нужно прогреть 3 конфигурации купола, чтобы при drill/up рантайм не зависал.
+      const testGeo = new SphereGeometry(1, 4, 4);
+
+      const createTestMat = (flight: boolean) => {
+        if (quality.active.frostedGlass) {
+          const mat = new MeshPhysicalMaterial({
+            metalness: 0,
+            roughness: 0.38, // GLASS_ROUGHNESS
+            transmission: 1,
+            thickness: 6,
+            ior: quality.active.glassExtras ? 1.5 : 1.45,
+            transparent: true,
+            side: DoubleSide,
+            depthWrite: !flight,
+            envMapIntensity: 0.45,
+          });
+          if (quality.active.glassExtras) {
+            mat.attenuationColor = new Color(0xbfd3d9); // GLASS_ATTENUATION_COLOR
+            mat.attenuationDistance = 40; // GLASS_ATTENUATION_DISTANCE
+            mat.clearcoat = 0.5;
+            mat.clearcoatRoughness = 0.3;
+            mat.dispersion = 0.35; // GLASS_DISPERSION
+          }
+          if (flight) mat.color.set(0xcfd2d6); // GLASS_COLOR
+          return mat;
+        } else {
+          const mat = new MeshLambertMaterial({
+            transparent: true,
+            opacity: 0.28, // CHEAP_DOME_OPACITY
+            depthWrite: false,
+          });
+          if (flight) mat.color.set(0xcfd2d6); // GLASS_COLOR
+          return mat;
+        }
+      };
+
+      const meshFlight = new Mesh(testGeo, createTestMat(true));
+      const instMeshFlight = new InstancedMesh(testGeo, createTestMat(true), 1);
+      const instMeshStatic = new InstancedMesh(testGeo, createTestMat(false), 1);
+
+      scene.add(meshFlight);
+      scene.add(instMeshFlight);
+      scene.add(instMeshStatic);
+
+      // Прогреваем также все категории зданий, чтобы при их появлении после окончания
+      // анимации не происходило повторной компиляции и сборки геометрий в рантайме.
+      const buildingMeshes: InstancedMesh[] = [];
+      const CATEGORIES = [
+        "other",
+        "code",
+        "document",
+        "image",
+        "video",
+        "audio",
+        "archive",
+        "binary",
+      ] as const;
+
+      for (const cat of CATEGORIES) {
+        const def = makeBuildingDef(cat);
+        const instMesh = new InstancedMesh(def.geometry, def.materials, 1);
+        scene.add(instMesh);
+        buildingMeshes.push(instMesh);
+      }
+
       try {
         await renderer.compileAsync(scene, camera);
       } catch (err) {
         console.warn("прекомпиляция шейдеров не удалась:", err);
+      } finally {
+        scene.remove(meshFlight);
+        scene.remove(instMeshFlight);
+        scene.remove(instMeshStatic);
+
+        meshFlight.material.dispose();
+        instMeshFlight.material.dispose();
+        instMeshStatic.material.dispose();
+        testGeo.dispose();
+
+        for (const instMesh of buildingMeshes) {
+          scene.remove(instMesh);
+          if (Array.isArray(instMesh.material)) {
+            instMesh.material.forEach((m) => m.dispose());
+          } else {
+            instMesh.material.dispose();
+          }
+        }
       }
     },
     applyQuality() {

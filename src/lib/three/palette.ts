@@ -28,14 +28,14 @@ export const CATEGORY_COLOR: Record<Category, number> = {
  * форма + материал), но город не пёстрый, а графитовый — North Star Nothing.
  */
 export const BODY_TINT: Record<Category, number> = {
-  code: 0x2a2e33, // сине-серый графит
-  document: 0x322f26, // тёпло-серый графит
-  image: 0x26302b, // зелёно-серый графит
-  video: 0x332c24, // оранж-серый графит
-  audio: 0x302a30, // пурпур-серый графит
-  archive: 0x34291f, // кирпич-серый графит
-  binary: 0x262b31, // сине-серый графит (холоднее code)
-  other: 0x2b2b2e, // нейтральный графит
+  code: 0x32373d, // сине-серый графит
+  document: 0x3c382e, // тёпло-серый графит
+  image: 0x2e3a34, // зелёно-серый графит
+  video: 0x3d352b, // оранж-серый графит
+  audio: 0x3a323a, // пурпур-серый графит
+  archive: 0x3e3125, // кирпич-серый графит
+  binary: 0x2e343b, // сине-серый графит (холоднее code)
+  other: 0x343437, // нейтральный графит
 };
 
 /**
@@ -113,7 +113,7 @@ export const DOME_RING_COLOR = 0x9aa0a6;
 export const STUB_COLOR = 0x4a4d52;
 
 /** Нейтральный цвет «земли» города. */
-export const GROUND_COLOR = 0x1a1d24;
+export const GROUND_COLOR = 0x1d2028;
 
 /**
  * Тинт «плота» района и его грубого силуэта (LOD-блок издалека). Приглушённый,

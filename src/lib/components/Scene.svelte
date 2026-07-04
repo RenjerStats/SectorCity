@@ -415,6 +415,7 @@
       fresh.className = canvas.className;
       canvas.replaceWith(fresh);
       canvas = fresh;
+      canvas.style.cursor = graphicsLevel.get() === "experimental" ? "none" : "";
     }
 
     /** Зарегистрировать покадровые оверлеи (LOD, окна над зданием, компас) на
@@ -469,6 +470,7 @@
       // подъём). Первый подъём берёт готовый <canvas> из разметки как есть.
       if (canvasClaimed) swapCanvas();
       canvasClaimed = true;
+      canvas.style.cursor = level === "experimental" ? "none" : "";
       handle =
         QUALITY[level].backend === "webgpu"
           ? await createSceneWebGPU(canvas)

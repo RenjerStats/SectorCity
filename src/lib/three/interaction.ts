@@ -19,17 +19,25 @@ import {
   LineBasicMaterial,
   LineSegments,
   Matrix4,
+  Object3D,
+  PointLight,
   Quaternion,
   Raycaster,
   Vector2,
   Vector3,
 } from "three";
 import type { ScanNode } from "../ipc/contract";
-import type { PickInfo } from "./city";
+import type { CityView, PickInfo } from "./city";
 import type { SceneHandle } from "./scene";
 import { activeView, isInteractive } from "./navigator";
 import { THEMES_3D } from "./theme";
 import { theme } from "../store/settings";
+import { quality } from "./quality";
+import {
+  cursorLightColor,
+  cursorLightIntensity,
+  cursorLightPos,
+} from "./cursor-light-shared";
 
 /** Колбэки наружу: владелец заворачивает их в стор / машину режимов. */
 export interface InteractionCallbacks {
@@ -116,6 +124,8 @@ function makeReticleGeometry(): BufferGeometry {
 interface Hit {
   mesh: InstancedMesh;
   id: number;
+  point?: Vector3;
+  normal?: Vector3;
 }
 
 export function setupInteraction(
@@ -145,10 +155,18 @@ export function setupInteraction(
   highlight.matrixAutoUpdate = false;
   handle.add(highlight);
 
+  // Временный точечный источник света, привязанный к курсору.
+  // Изначально интенсивность 0 (выключен), но видимость включена (visible=true),
+  // чтобы избежать повторной компиляции шейдеров при включении/выключении источника.
+  const cursorLight = new PointLight(THEMES_3D[theme.get()].accent, 0, 75);
+  handle.add(cursorLight);
+
   // Обводка следует за темой (стор-мост, docs §1): при смене темы перекрашиваем
   // акцент визира. subscribe шлёт текущее значение сразу — цвет всегда актуален.
   const unsubTheme = theme.subscribe((name) => {
-    highlightMat.color.setHex(THEMES_3D[name].accent);
+    const accentColor = THEMES_3D[name].accent;
+    highlightMat.color.setHex(accentColor);
+    cursorLight.color.setHex(accentColor);
   });
 
   const m = new Matrix4();
@@ -174,7 +192,20 @@ export function setupInteraction(
       // чтобы курсор упирался в купол/плиту папки, а не в содержимое под стеклом
       // (надёжное и предсказуемое наведение вместо случайного зацепа при ракурсе).
       if (!view.isPickTarget(mesh, h.instanceId)) continue;
-      return { mesh, id: h.instanceId };
+
+      let normal: Vector3 | undefined;
+      if (h.face) {
+        normal = h.face.normal.clone();
+        const instanceMatrix = new Matrix4();
+        mesh.getMatrixAt(h.instanceId, instanceMatrix);
+        normal.transformDirection(instanceMatrix);
+      }
+      return {
+        mesh,
+        id: h.instanceId,
+        point: h.point.clone(),
+        normal,
+      };
     }
     return null;
   }
@@ -191,9 +222,83 @@ export function setupInteraction(
     return a === b || (!!a && !!b && a.mesh === b.mesh && a.id === b.id);
   }
 
+  function getCursorTarget(): { point: Vector3; normal: Vector3 } | null {
+    if (!pointerInside || !isInteractive(handle.content)) return null;
+    const view = activeView(handle.content);
+    if (!view) return null;
+
+    const targets: Object3D[] = [];
+    handle.content.traverse((obj) => {
+      if (obj.userData.view) {
+        const levelView = obj.userData.view as CityView;
+        targets.push(...levelView.allVisualMeshes());
+      }
+      if (obj.name === "ground" && obj.visible) {
+        targets.push(obj);
+      }
+    });
+
+    if (targets.length === 0) return null;
+    raycaster.setFromCamera(pointer, handle.camera);
+    const hits = raycaster.intersectObjects(targets, false);
+    for (const h of hits) {
+      let meshView = view;
+      let parent: Object3D | null = h.object.parent;
+      while (parent) {
+        if (parent.userData.view) {
+          meshView = parent.userData.view as CityView;
+          break;
+        }
+        parent = parent.parent;
+      }
+
+      if (h.object.type === "InstancedMesh") {
+        const mesh = h.object as InstancedMesh;
+        if (h.instanceId == null || !meshView.isPickTarget(mesh, h.instanceId)) continue;
+      }
+
+      if (h.face) {
+        const normal = h.face.normal.clone();
+        if (h.object.type === "InstancedMesh") {
+          const instanceMatrix = new Matrix4();
+          (h.object as InstancedMesh).getMatrixAt(h.instanceId!, instanceMatrix);
+          normal.transformDirection(instanceMatrix);
+        } else {
+          normal.transformDirection(h.object.matrixWorld);
+        }
+        return {
+          point: h.point.clone(),
+          normal,
+        };
+      }
+    }
+    return null;
+  }
+
+  function updateCursorLight(): void {
+    const target = quality.level === "experimental" ? getCursorTarget() : null;
+    if (target) {
+      const offset = 3.5;
+      cursorLight.position.copy(target.point).addScaledVector(target.normal, offset);
+      cursorLight.intensity = 120;
+
+      // Обновляем разделяемые юниформы
+      cursorLightPos.value.copy(cursorLight.position);
+      cursorLightIntensity.value = cursorLight.intensity;
+      cursorLightColor.value.copy(cursorLight.color);
+    } else {
+      cursorLight.intensity = 0;
+
+      // Обновляем разделяемые юниформы
+      cursorLightIntensity.value = 0;
+    }
+  }
+
   function setHover(hit: Hit | null): void {
     if (sameHit(hit, hovered)) {
-      if (hit) applyHighlight(hit); // камера могла сдвинуться — освежить
+      if (hit) {
+        applyHighlight(hit); // камера могла сдвинуться — освежить
+      }
       return;
     }
     hovered = hit;
@@ -215,6 +320,7 @@ export function setupInteraction(
     // Во время твина зума (origin shift не завершён) пикинг выключен.
     const live = pointerInside && isInteractive(handle.content);
     setHover(live ? raycastHit() : null);
+    updateCursorLight();
   });
 
   function toNdc(e: PointerEvent): void {
@@ -345,6 +451,7 @@ export function setupInteraction(
       hovered = null;
       highlight.visible = false;
       cb.onHover(null);
+      cursorLight.intensity = 0;
     },
     clearSelection() {
       setSelected(null);
@@ -368,6 +475,7 @@ export function setupInteraction(
       canvas.removeEventListener("contextmenu", onContextMenu);
       highlight.geometry.dispose();
       (highlight.material as LineBasicMaterial).dispose();
+      cursorLight.parent?.remove(cursorLight);
     },
   };
 }

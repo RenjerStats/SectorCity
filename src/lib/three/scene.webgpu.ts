@@ -29,11 +29,17 @@ import {
   AmbientLight,
   Color,
   DirectionalLight,
+  DoubleSide,
   Group,
+  InstancedMesh,
+  Mesh,
+  MeshLambertMaterial,
+  MeshPhysicalMaterial,
   type Object3D,
   PCFShadowMap,
   PerspectiveCamera,
   Scene,
+  SphereGeometry,
   Vector3,
 } from "three";
 import { MapControls } from "three/examples/jsm/controls/MapControls.js";
@@ -55,6 +61,7 @@ import { traa } from "three/examples/jsm/tsl/display/TRAANode.js";
 import { Easing, Group as TweenGroup, Tween } from "@tweenjs/tween.js";
 import { INITIAL_CAMERA_POS, INITIAL_TARGET } from "./home";
 import { quality } from "./quality";
+import { makeBuildingDef } from "./buildings";
 import type { SceneHandle } from "./scene";
 
 /**
@@ -68,7 +75,7 @@ import type { SceneHandle } from "./scene";
 export async function createSceneWebGPU(
   canvas: HTMLCanvasElement,
 ): Promise<SceneHandle> {
-  const renderer = new WebGPURenderer({ canvas, antialias: true });
+  const renderer = new WebGPURenderer({ canvas, antialias: false });
   await renderer.init();
 
   renderer.setPixelRatio(
@@ -81,6 +88,8 @@ export async function createSceneWebGPU(
 
   const scene = new Scene();
   scene.background = new Color(0x080808);
+
+
 
   // Окружение (IBL). PMREM из "three/webgpu" (знает про async-бэкенд, вызывать
   // ПОСЛЕ init). sigma здесь — радианы: 0.7 клипается (нужно 341 сэмпл при максимуме
@@ -271,7 +280,7 @@ export async function createSceneWebGPU(
         // разрешаем его TRAA-денойзом ниже, иначе видимый шум.
         const gi = ssgi(colorNode, depthNode, normalNode, camera);
         gi.sliceCount.value = 2; // качество среза (деф. 1) — как в примере
-        gi.stepCount.value = 8; // шагов марша (деф. 12) — компромисс скорость/шум
+        gi.stepCount.value = 16; // шагов марша (деф. 12) — компромисс скорость/шум
         // Дефолт giIntensity=10 рассчитан на почти ТЁМНУЮ сцену офиц. примера
         // (point light + чёрный ambient, GI там — главный свет). Наш город уже
         // освещён (ambient+env+солнце) → 10 заливал тени и красил стекло куполов
@@ -411,10 +420,94 @@ export async function createSceneWebGPU(
       };
     },
     async compile() {
+      // Создаем геометрию и материалы для «прогрева» кэша WebGPU.
+      // Нам нужно прогреть 3 конфигурации купола, чтобы при drill/up рантайм не зависал.
+      const testGeo = new SphereGeometry(1, 4, 4);
+
+      const createTestMat = (flight: boolean) => {
+        if (quality.active.frostedGlass) {
+          const mat = new MeshPhysicalMaterial({
+            metalness: 0,
+            roughness: 0.38, // GLASS_ROUGHNESS
+            transmission: 1,
+            thickness: 6,
+            ior: quality.active.glassExtras ? 1.5 : 1.45,
+            transparent: true,
+            side: DoubleSide,
+            depthWrite: !flight,
+            envMapIntensity: 0.45,
+          });
+          if (quality.active.glassExtras) {
+            mat.attenuationColor = new Color(0xbfd3d9); // GLASS_ATTENUATION_COLOR
+            mat.attenuationDistance = 40; // GLASS_ATTENUATION_DISTANCE
+            mat.clearcoat = 0.5;
+            mat.clearcoatRoughness = 0.3;
+            mat.dispersion = 0.35; // GLASS_DISPERSION
+          }
+          if (flight) mat.color.set(0xcfd2d6); // GLASS_COLOR
+          return mat;
+        } else {
+          const mat = new MeshLambertMaterial({
+            transparent: true,
+            opacity: 0.28, // CHEAP_DOME_OPACITY
+            depthWrite: false,
+          });
+          if (flight) mat.color.set(0xcfd2d6); // GLASS_COLOR
+          return mat;
+        }
+      };
+
+      const meshFlight = new Mesh(testGeo, createTestMat(true));
+      const instMeshFlight = new InstancedMesh(testGeo, createTestMat(true), 1);
+      const instMeshStatic = new InstancedMesh(testGeo, createTestMat(false), 1);
+
+      scene.add(meshFlight);
+      scene.add(instMeshFlight);
+      scene.add(instMeshStatic);
+
+      // Прогреваем также все категории зданий, чтобы при их появлении после окончания
+      // анимации не происходило повторной компиляции и сборки геометрий в рантайме.
+      const buildingMeshes: InstancedMesh[] = [];
+      const CATEGORIES = [
+        "other",
+        "code",
+        "document",
+        "image",
+        "video",
+        "audio",
+        "archive",
+        "binary",
+      ] as const;
+
+      for (const cat of CATEGORIES) {
+        const def = makeBuildingDef(cat);
+        const instMesh = new InstancedMesh(def.geometry, def.materials, 1);
+        scene.add(instMesh);
+        buildingMeshes.push(instMesh);
+      }
+
       try {
         await renderer.compileAsync(scene, camera);
       } catch (err) {
         console.warn("прекомпиляция шейдеров (webgpu) не удалась:", err);
+      } finally {
+        scene.remove(meshFlight);
+        scene.remove(instMeshFlight);
+        scene.remove(instMeshStatic);
+
+        meshFlight.material.dispose();
+        instMeshFlight.material.dispose();
+        instMeshStatic.material.dispose();
+        testGeo.dispose();
+
+        for (const instMesh of buildingMeshes) {
+          scene.remove(instMesh);
+          if (Array.isArray(instMesh.material)) {
+            instMesh.material.forEach((m) => m.dispose());
+          } else {
+            instMesh.material.dispose();
+          }
+        }
       }
     },
     applyQuality() {

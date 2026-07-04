@@ -122,6 +122,8 @@ declare module "three/tsl" {
   /** Узел TSL-графа: операторы/сэмплинг возвращают такой же узел (структурно). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   export type TSLNode = any;
+  export const positionWorld: TSLNode;
+  export const uniform: (value: any, type?: string) => TSLNode;
   /** Пасс сцены → узел с доступом к цвету/глубине/нормалям (через MRT). */
   export const pass: (scene: unknown, camera: unknown) => TSLNode;
   export const mrt: (outputs: Record<string, TSLNode>) => TSLNode;
