@@ -1118,7 +1118,7 @@ export function buildLevel(
     const full = layoutToWorld(aggDistrict.rect, 0);
     const dw = Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2);
     const dd = Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2);
-    const radius = Math.max(dw, dd) / 2 + 1.0;
+    const radius = Math.sqrt(dw * dw + dd * dd) / 2 + 3.0;
     aggregatedFolderPos.value.set(full.centerX, 0, full.centerZ);
     aggregatedFolderRadius.value = radius;
   } else {
