@@ -936,7 +936,7 @@ function makeDomeMaterial(
       const inX = aggregatedFolderHalfW.sub(diffX).clamp(0, 1).sign();
       const inZ = aggregatedFolderHalfD.sub(diffZ).clamp(0, 1).sign();
       const isAgg = inX.mul(inZ); // 1.0 внутри прямоугольника, 0.0 снаружи
-      const glowColor = isAgg.mix(tslColor(0x0088ff), tslColor(0xc580ff));
+      const glowColor = isAgg.mix(tslColor(0x0088ff), tslColor(0x8b7df0));
       
       // 1. Краевой неоновый контур (Френель) — интенсивность 0.2
       const fresnel = float(1.0).sub(normalView.z.clamp(0, 1)).pow(3.5);
