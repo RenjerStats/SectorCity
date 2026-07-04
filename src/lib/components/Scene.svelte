@@ -4,6 +4,8 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { createScene, type SceneHandle } from "../three/scene";
+  import { createSceneWebGPU } from "../three/scene.webgpu";
+  import { QUALITY, type GraphicsLevel } from "../three/quality";
   import { createNavigator, type CityNavigator } from "../three/navigator";
   import StatusOverlay from "./StatusOverlay.svelte";
   import StarGlyph from "./StarGlyph.svelte";
@@ -61,7 +63,11 @@
     showToast,
     type NodeAction,
   } from "../store/ui";
-  import { restoreLastScan, graphicsLevel } from "../store/settings";
+  import {
+    restoreLastScan,
+    graphicsLevel,
+    setGraphicsLevel,
+  } from "../store/settings";
   import type {
     AggSpec,
     Category,
@@ -387,80 +393,180 @@
   }
 
   onMount(() => {
-    handle = createScene(canvas);
-    nav = createNavigator(handle);
+    // Бэкенд текущего стека и отписки его покадровых оверлеев. Смена уровня графики
+    // ЧЕРЕЗ границу WebGL↔WebGPU пересоздаёт весь стек (бэкенд нельзя переключить на
+    // живом canvas), поэтому держим их отдельно и умеем срывать/поднимать заново.
+    let currentBackend: "webgl" | "webgpu" = "webgl";
+    let frameOffs: (() => void)[] = [];
+    let remounting = false;
+    let disposed = false;
+    let snapUnlisten: UnlistenFn | undefined;
 
-    // Взаимодействие: наведение → стор (контент тултипа), клик по району → drill.
-    interaction = setupInteraction(handle, {
-      onHover: (node) => hoveredNode.set(node),
-      onDrill: (node) => void drill(node),
-      // Клик по файлу → карточка над зданием; клик мимо/по «Прочее» → null.
-      // Режим (appMode) не трогаем: карточка живёт на отдельном атоме, как hover.
-      onSelect: (node) => selectedNode.set(node),
-      // Режим сканера мусора: Ctrl+ЛКМ — пометить/снять узел на снос (и файл,
-      // и папку). Обычный ЛКМ — как в стандартном режиме (карточка/drill).
-      // Системные (locked) и синтетическую «Мелочь» (aggregated, нет реального
-      // пути) не помечаем.
-      isCleanup: () => appMode.get().kind === "cleanup",
-      onMark: (node) => {
-        if (node.flags.includes("locked") || node.flags.includes("aggregated"))
+    // Один <canvas> НАВСЕГДА привязан к первому полученному типу контекста: после
+    // WebGPU на нём нельзя создать WebGL-контекст (и наоборот) — иначе
+    // «Canvas has an existing context of a different type». Поэтому перед КАЖДЫМ
+    // повторным подъёмом стека (в т.ч. в fallback-ветке, где WebGPU уже мог
+    // занять контекст) подменяем DOM-элемент на свежий. `className` копируем —
+    // scoped-CSS Svelte селектит `canvas` по классу с хэшем, без него холст
+    // потеряет `width/height: 100%`.
+    let canvasClaimed = false;
+    function swapCanvas() {
+      const fresh = document.createElement("canvas");
+      fresh.className = canvas.className;
+      canvas.replaceWith(fresh);
+      canvas = fresh;
+    }
+
+    /** Зарегистрировать покадровые оверлеи (LOD, окна над зданием, компас) на
+     *  ТЕКУЩЕМ handle; отписки складываем в `frameOffs` (снимаются при ремоунте). */
+    function wireOverlays() {
+      if (!handle) return;
+      // LOD активного уровня: покадрово по позиции камеры (дёшево).
+      let lastFrameT = performance.now();
+      const offLod = handle.onFrame(() => {
+        const now = performance.now();
+        const dt = now - lastFrameT;
+        lastFrameT = now;
+        nav?.updateLOD();
+        nav?.updateFade(dt); // кросс-фейд градиента затемнения декора (план §7.1)
+      });
+      // Позицию окон над зданием ставим покадрово императивно (вне реконсиляции
+      // Svelte, docs §4): полное — по якорю выбранного, мини — по наведённому.
+      const place = (
+        el: HTMLDivElement | undefined,
+        anchor: Vector3 | null,
+      ) => {
+        if (!el || !handle) return;
+        if (!anchor) {
+          el.style.opacity = "0";
           return;
-        toggleMark(node.path, node.size);
-      },
-      // ПКМ → контекстное меню (vision §I.10). Клик мимо зданий (info=null) —
-      // меню не показываем (закрываем текущее).
-      onContext: (info, x, y) => {
-        setMenu(
-          info
-            ? { node: info.node, drillTarget: info.drillTarget, x, y }
-            : null,
+        }
+        const s = handle.worldToScreen(anchor);
+        el.style.transform = `translate(-50%, -100%) translate(${s.x}px, ${s.y}px)`;
+        el.style.opacity = s.visible ? "1" : "0";
+      };
+      const offCard = handle.onFrame(() => {
+        if (!interaction) return;
+        place(cardEl, interaction.selectionAnchor());
+        place(hoverEl, interaction.hoverAnchor());
+      });
+      // Компас: угол = азимут камеры вокруг цели (0 — взгляд на север, −Z).
+      const offCompass = handle.onFrame(() => {
+        if (!compassRotEl || !handle) return;
+        const t = handle.cameraTarget();
+        const dx = handle.camera.position.x - t.x;
+        const dz = handle.camera.position.z - t.z;
+        const deg = (Math.atan2(dx, dz) * 180) / Math.PI;
+        compassRotEl.style.transform = `rotate(${deg}deg)`;
+      });
+      frameOffs.push(offLod, offCard, offCompass);
+    }
+
+    /** Поднять рендер-стек под уровень `level`: рендерер по бэкенду (WebGPU —
+     *  асинхронно), навигатор, взаимодействие, оверлеи. Бросает при провале WebGPU. */
+    async function buildStack(level: GraphicsLevel) {
+      // Свежий холст, если прежний уже получал контекст (смена бэкенда/повторный
+      // подъём). Первый подъём берёт готовый <canvas> из разметки как есть.
+      if (canvasClaimed) swapCanvas();
+      canvasClaimed = true;
+      handle =
+        QUALITY[level].backend === "webgpu"
+          ? await createSceneWebGPU(canvas)
+          : createScene(canvas);
+      currentBackend = QUALITY[level].backend;
+      nav = createNavigator(handle);
+      // Взаимодействие: наведение → стор, клик → drill, ПКМ → меню, Ctrl+ЛКМ → снос.
+      interaction = setupInteraction(handle, {
+        onHover: (node) => hoveredNode.set(node),
+        onDrill: (node) => void drill(node),
+        onSelect: (node) => selectedNode.set(node),
+        // Системные (locked) и синтетическую «Мелочь» (aggregated) не помечаем.
+        isCleanup: () => appMode.get().kind === "cleanup",
+        onMark: (node) => {
+          if (
+            node.flags.includes("locked") ||
+            node.flags.includes("aggregated")
+          )
+            return;
+          toggleMark(node.path, node.size);
+        },
+        onContext: (info, x, y) => {
+          setMenu(
+            info
+              ? { node: info.node, drillTarget: info.drillTarget, x, y }
+              : null,
+          );
+        },
+      });
+      wireOverlays();
+    }
+
+    /** Сорвать текущий стек: снять оверлеи, освободить взаимодействие/навигатор/сцену. */
+    function teardownStack() {
+      for (const off of frameOffs) off();
+      frameOffs = [];
+      interaction?.dispose();
+      interaction = undefined;
+      nav?.dispose();
+      nav = undefined;
+      handle?.dispose();
+      handle = undefined;
+    }
+
+    /** Пересоздать стек под новый бэкенд (WebGL↔WebGPU) и перестроить текущий
+     *  уровень. При провале WebGPU — откат на «Максимальный» (WebGL). */
+    async function remount(level: GraphicsLevel) {
+      remounting = true;
+      const crumbs = breadcrumbs.get();
+      const path = crumbs.length ? crumbs[crumbs.length - 1].path : "";
+      statusKind = "loading";
+      teardownStack();
+      try {
+        await buildStack(level);
+      } catch (err) {
+        console.warn(
+          "WebGPU-сцена не поднялась — откат на «Максимальный»:",
+          err,
         );
-      },
-    });
+        showToast("WebGPU недоступен — откат на «Максимальный»");
+        setGraphicsLevel("maximal"); // подписчик проигнорит (remounting=true)
+        try {
+          await buildStack("maximal");
+        } catch (err2) {
+          console.error("не удалось поднять WebGL-сцену:", err2);
+          remounting = false;
+          return;
+        }
+      }
+      try {
+        await loadRoot(path); // перестроить уровень в свежем nav
+        await handle?.compile();
+      } catch (err) {
+        console.warn("пересборка уровня после ремоунта не удалась:", err);
+      }
+      statusKind = "none";
+      remounting = false;
+    }
 
-    // LOD активного уровня: покадрово по позиции камеры (дёшево, переключение
-    // только на смене состояния). Навигатор знает, какой уровень активен.
-    let lastFrameT = performance.now();
-    const offLod = handle.onFrame(() => {
-      const now = performance.now();
-      const dt = now - lastFrameT;
-      lastFrameT = now;
-      nav?.updateLOD();
-      nav?.updateFade(dt); // кросс-фейд градиента затемнения декора (план §7.1)
-    });
-
-    // Позицию окон над зданием ставим покадрово императивно (вне реконсиляции
-    // Svelte, docs §4): полное — по якорю выбранного, мини — по якорю
-    // наведённого. Контент/режим отрисованы реактивно; здесь только проекция.
-    const place = (el: HTMLDivElement | undefined, anchor: Vector3 | null) => {
-      if (!el || !handle) return;
-      if (!anchor) {
-        el.style.opacity = "0";
+    // Первичный подъём стека (для WebGPU — асинхронный), затем стартовый поток.
+    void (async () => {
+      try {
+        await buildStack(graphicsLevel.get());
+      } catch (err) {
+        console.warn(
+          "стартовая WebGPU-сцена не поднялась — откат на WebGL:",
+          err,
+        );
+        showToast("WebGPU недоступен — откат на «Максимальный»");
+        setGraphicsLevel("maximal");
+        await buildStack("maximal");
+      }
+      if (disposed) {
+        teardownStack();
         return;
       }
-      const s = handle.worldToScreen(anchor);
-      el.style.transform = `translate(-50%, -100%) translate(${s.x}px, ${s.y}px)`;
-      el.style.opacity = s.visible ? "1" : "0";
-    };
-    const offCard = handle.onFrame(() => {
-      if (!interaction) return;
-      // cardEl — полное окно по якорю выбранного; hoverEl — мини по наведённому.
-      place(cardEl, interaction.selectionAnchor());
-      place(hoverEl, interaction.hoverAnchor());
-    });
-
-    // Компас: угол = азимут камеры вокруг цели (0 — взгляд на север, т.е. в −Z:
-    // верх treemap-карты). Вращаем DOM императивно покадрово; глиф при этом
-    // всегда указывает северным лучом на север МИРА (раскладка детерминирована →
-    // север постоянен → пространственная память, план §6).
-    const offCompass = handle.onFrame(() => {
-      if (!compassRotEl || !handle) return;
-      const t = handle.cameraTarget();
-      const dx = handle.camera.position.x - t.x;
-      const dz = handle.camera.position.z - t.z;
-      const deg = (Math.atan2(dx, dz) * 180) / Math.PI;
-      compassRotEl.style.transform = `rotate(${deg}deg)`;
-    });
+      await runStartFlow();
+    })();
 
     // Клавиатура (Esc-стек, drill/свойства, действия над узлом) централизована в
     // hotkeys.ts (единственный владелец keydown). Сцена лишь исполняет команды
@@ -550,18 +656,26 @@
       scheduleReaggregate();
     });
 
-    // Смена уровня графики (настройки) → живьём применить рендер-параметры (pixelRatio,
-    // разрешение transmission) и пересобрать активный уровень, чтобы материалы (стекло/
-    // металл/PBR) отразили новый уровень. `quality.active` уже обновлён сеттером в сторе.
-    // Первый синхронный вызов пропускаем (стартовый уровень грузится ниже).
+    // Смена уровня графики (настройки). Внутри одного бэкенда — живьём применяем
+    // рендер-параметры (pixelRatio/тени/пост) + пересобираем уровень (материалы
+    // стекло/металл/PBR). ЧЕРЕЗ границу WebGL↔WebGPU (напр. →«экспериментальный») —
+    // рендерер нельзя переключить на живом canvas, поэтому ПЕРЕСОЗДаём весь стек
+    // (`remount`). `quality.active` уже обновлён сеттером в сторе. Первый синхронный
+    // вызов пропускаем (стартовый уровень грузится отдельным потоком выше); во время
+    // самого ремоунта повторные вызовы игнорируем (гард `remounting`).
     let graphicsFirst = true;
-    const offGraphics = graphicsLevel.subscribe(() => {
+    const offGraphics = graphicsLevel.subscribe((level) => {
       if (graphicsFirst) {
         graphicsFirst = false;
         return;
       }
-      handle?.applyQuality();
-      void reaggregate();
+      if (remounting) return;
+      if (QUALITY[level].backend !== currentBackend) {
+        void remount(level);
+      } else {
+        handle?.applyQuality();
+        void reaggregate();
+      }
     });
 
     // Команды из header (Scan/Cancel/Reset) — единственный канал «шапка → сцена»
@@ -658,91 +772,93 @@
     // `snapshot://ready` (его слушатель ставим ДО запроса, чтобы событие не
     // проскочило в щель между ответом и подпиской). `started` гасит двойной
     // вход (ответ с готовым корнем + догнавшее событие).
-    appMode.set({ kind: "scanning", progress: 0 });
-    let started = false;
-    let snapUnlisten: UnlistenFn | undefined;
-    /** Однократная стартовая инициализация: построить уровень по корню (`null` —
-     *  демо + приветствие), прекомпилировать шейдеры (§1.2) и снять оверлей. */
-    async function startWith(root: string | null): Promise<void> {
-      if (started) return;
-      started = true;
-      try {
-        const target = root ?? "";
-        // Замер §1.2: первый buildCity + compileAsync + первый кадр города —
-        // смотреть в devtools Performance (marks) или в консоли.
-        performance.mark("sc:first-build:start");
-        await loadRoot(target);
-        performance.mark("sc:first-build:end");
-        performance.measure(
-          "sc:first-build",
-          "sc:first-build:start",
-          "sc:first-build:end",
-        );
-        // Прекомпиляция шейдеров (transmission-купола + PMREM) ДО снятия оверлея:
-        // иначе их синхронная сборка на первом кадре города даёт jank (§1.2).
-        await handle?.compile();
-        performance.mark("sc:first-compile:end");
-        performance.measure(
-          "sc:first-compile",
-          "sc:first-build:end",
-          "sc:first-compile:end",
-        );
-        const offFirstFrame = handle?.onFrame(() => {
-          offFirstFrame?.();
-          performance.mark("sc:first-frame");
+    //
+    // Вынесено в функцию: стартовый поток запускается ПОСЛЕ подъёма стека
+    // (`buildStack` асинхронна для WebGPU), см. async-IIFE в начале onMount.
+    async function runStartFlow() {
+      appMode.set({ kind: "scanning", progress: 0 });
+      let started = false;
+      /** Однократная стартовая инициализация: построить уровень по корню (`null` —
+       *  демо + приветствие), прекомпилировать шейдеры (§1.2) и снять оверлей. */
+      async function startWith(root: string | null): Promise<void> {
+        if (started) return;
+        started = true;
+        try {
+          const target = root ?? "";
+          // Замер §1.2: первый buildCity + compileAsync + первый кадр города —
+          // смотреть в devtools Performance (marks) или в консоли.
+          performance.mark("sc:first-build:start");
+          await loadRoot(target);
+          performance.mark("sc:first-build:end");
           performance.measure(
-            "sc:first-frame-after-build",
+            "sc:first-build",
+            "sc:first-build:start",
+            "sc:first-build:end",
+          );
+          // Прекомпиляция шейдеров (transmission-купола + PMREM) ДО снятия оверлея:
+          // иначе их синхронная сборка на первом кадре города даёт jank (§1.2).
+          await handle?.compile();
+          performance.mark("sc:first-compile:end");
+          performance.measure(
+            "sc:first-compile",
+            "sc:first-build:end",
             "sc:first-compile:end",
-            "sc:first-frame",
           );
-          const ms = (name: string) =>
-            performance.getEntriesByName(name)[0]?.duration.toFixed(0) ?? "?";
-          console.info(
-            `[perf] первый уровень: build ${ms("sc:first-build")}мс, ` +
-              `compile ${ms("sc:first-compile")}мс, ` +
-              `кадр ${ms("sc:first-frame-after-build")}мс`,
-          );
-        });
-        breadcrumbs.set([{ path: target, name: crumbName(target) }]);
-        appMode.set({ kind: "idle", path: target });
-        // Нет снимка прошлого скана → за демо-городом показываем приветствие
-        // с приглашением выбрать реальную папку; после скана оно скрывается.
-        statusKind = root === null ? "welcome" : "none";
-      } catch (err) {
-        console.warn("стартовый уровень недоступен:", err);
-        appMode.set({ kind: "idle", path: "" });
-        statusKind = "welcome";
+          const offFirstFrame = handle?.onFrame(() => {
+            offFirstFrame?.();
+            performance.mark("sc:first-frame");
+            performance.measure(
+              "sc:first-frame-after-build",
+              "sc:first-compile:end",
+              "sc:first-frame",
+            );
+            const ms = (name: string) =>
+              performance.getEntriesByName(name)[0]?.duration.toFixed(0) ?? "?";
+            console.info(
+              `[perf] первый уровень: build ${ms("sc:first-build")}мс, ` +
+                `compile ${ms("sc:first-compile")}мс, ` +
+                `кадр ${ms("sc:first-frame-after-build")}мс`,
+            );
+          });
+          breadcrumbs.set([{ path: target, name: crumbName(target) }]);
+          appMode.set({ kind: "idle", path: target });
+          // Нет снимка прошлого скана → за демо-городом показываем приветствие
+          // с приглашением выбрать реальную папку; после скана оно скрывается.
+          statusKind = root === null ? "welcome" : "none";
+        } catch (err) {
+          console.warn("стартовый уровень недоступен:", err);
+          appMode.set({ kind: "idle", path: "" });
+          statusKind = "welcome";
+        }
       }
-    }
-    if (!restoreLastScan.get()) {
-      void startWith(null);
-    } else {
-      listen<string | null>("snapshot://ready", (e) => {
-        void startWith(e.payload);
-      })
-        .then((un) => {
-          snapUnlisten = un;
-          return currentRoot();
+      if (!restoreLastScan.get()) {
+        void startWith(null);
+      } else {
+        listen<string | null>("snapshot://ready", (e) => {
+          void startWith(e.payload);
         })
-        .then((cur) => {
-          if (cur.loading) {
-            statusKind = "loading"; // корень появится с событием snapshot://ready
-            return;
-          }
-          void startWith(cur.root);
-        })
-        .catch((err) => {
-          // Вне Tauri (чистый vite) ни событий, ни IPC — стартуем на демо.
-          console.warn("стартовый корень недоступен:", err);
-          void startWith(null);
-        });
+          .then((un) => {
+            snapUnlisten = un;
+            return currentRoot();
+          })
+          .then((cur) => {
+            if (cur.loading) {
+              statusKind = "loading"; // корень появится с событием snapshot://ready
+              return;
+            }
+            void startWith(cur.root);
+          })
+          .catch((err) => {
+            // Вне Tauri (чистый vite) ни событий, ни IPC — стартуем на демо.
+            console.warn("стартовый корень недоступен:", err);
+            void startWith(null);
+          });
+      }
     }
 
     return () => {
+      disposed = true;
       snapUnlisten?.();
-      offLod();
-      offCard();
-      offCompass();
       offFilter();
       offSearch();
       offSearchIpc();
@@ -757,10 +873,7 @@
       if (aggTimer) clearTimeout(aggTimer);
       offCmd();
       unlisten?.();
-      interaction?.dispose();
-      nav?.dispose();
-      handle?.dispose();
-      handle = undefined;
+      teardownStack();
     };
   });
 

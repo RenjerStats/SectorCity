@@ -123,22 +123,32 @@ function glass(): Material {
   return quality.active.pbr
     ? new MeshPhysicalMaterial({
         color: GLASS_PANEL_COLOR,
+        // roughness 0.14 (было 0.06): почти-зеркальная панель на тонких
+        // «перегородках» давала субпиксельные искры-пилу на дистанции; лёгкое
+        // расширение блика убирает мерцание, глянец остаётся.
+        roughness: 0.14,
         metalness: 0,
-        roughness: 0.06,
-        envMapIntensity: 1.5,
-        clearcoat: 1,
-        clearcoatRoughness: 0.06,
+        // Снижено с 1.5: почти-зеркальная панель на полной силе env-отражения
+        // давала блик такой же силы, как у купола — на маленькой панели он тоже
+        // выжигал большую часть площади.
+        envMapIntensity: 0.6,
+        clearcoat: 0.5,
+        clearcoatRoughness: 0.25,
       })
     : new MeshLambertMaterial({ color: GLASS_PANEL_COLOR });
 }
 /** Сталь (обвязка/крышки). На минимальном уровне — плоский серый Lambert (без металла). */
 function steel(): Material {
+  // metalness/roughness смягчены (0.95/0.3 → 0.8/0.45): чистый металл не имеет
+  // диффуза — тени на обвязке/крышках видны только в зеркальном лобе солнца, а
+  // острый спекуляр на тонких деталях «искрил пилой» на дистанции (см. плиты в
+  // city.ts, та же причина).
   return quality.active.pbr
     ? new MeshStandardMaterial({
         color: STEEL_COLOR,
-        metalness: 0.95,
-        roughness: 0.3,
-        envMapIntensity: 1.0,
+        metalness: 0.8,
+        roughness: 0.45,
+        envMapIntensity: 0.5,
       })
     : new MeshLambertMaterial({ color: STEEL_COLOR });
 }

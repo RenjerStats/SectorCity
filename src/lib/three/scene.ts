@@ -9,19 +9,30 @@
  * (raycast/hover/drill) — interaction.ts; сцена лишь даёт им контейнер и сервисы.
  */
 import {
+  ACESFilmicToneMapping,
   AmbientLight,
   Color,
   DirectionalLight,
   Group,
+  HalfFloatType,
   type Object3D,
+  PCFShadowMap,
   PerspectiveCamera,
   PMREMGenerator,
   Scene,
+  Vector2,
   Vector3,
+  VSMShadowMap,
   WebGLRenderer,
+  WebGLRenderTarget,
 } from "three";
 import { MapControls } from "three/examples/jsm/controls/MapControls.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { Easing, Group as TweenGroup, Tween } from "@tweenjs/tween.js";
 import { INITIAL_CAMERA_POS, INITIAL_TARGET } from "./home";
 import { quality } from "./quality";
@@ -71,9 +82,11 @@ export interface SceneHandle {
   compile(): Promise<void>;
   /**
    * Применить активный уровень графики (`quality.active`) к рендеру: кап
-   * pixelRatio и разрешение прохода transmission-стекла. Зовётся при смене уровня
-   * в настройках. Материалы уровня (стекло/металл/PBR) подхватывает пересборка
-   * города — не здесь. MSAA не трогаем (нельзя без пересоздания контекста).
+   * pixelRatio, разрешение прохода transmission-стекла, тени (проход + тип карты
+   * PCF/VSM) и постобработку (поднять/снять композер GTAO+bloom). Зовётся при
+   * смене уровня в настройках. Материалы уровня (стекло/металл/PBR) подхватывает
+   * пересборка города — не здесь. MSAA canvas не трогаем (нельзя без пересоздания
+   * контекста); при композере сглаживание даёт мультисемплинг его таргета.
    */
   applyQuality(): void;
   /** Вернуть камеру в исходный обзорный ракурс. `ms > 0` — плавный твин
@@ -128,6 +141,24 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
   );
   renderer.transmissionResolutionScale =
     quality.active.transmissionResolutionScale;
+  // Мягкие тени — включаются с высокого уровня (см. quality.active.shadows).
+  // Тип карты по уровню: PCF + `shadow.radius` для мягкого края (высокий) или VSM
+  // (максимальный) — там radius задаёт настоящий блюр карты, полутени шире и мягче.
+  // (`PCFSoftShadowMap` в этой версии three депрекейчена.) Смена типа живьём
+  // корректна: следом идёт пересборка города — все материалы-получатели новые.
+  renderer.shadowMap.type = quality.active.vsmShadows
+    ? VSMShadowMap
+    : PCFShadowMap;
+  renderer.shadowMap.enabled = quality.active.shadows;
+  // ACES filmic tone mapping: без него значения >1 (блик на лаке/стекле, env-
+  // отражение стали при почти-зеркальной roughness) режутся В ЖЁСТКИЙ БЕЛЫЙ
+  // (`NoToneMapping` = линейный clamp) — отсюда «выжженные» пятна на высоком/
+  // максимальном качестве (там впервые появляются clearcoat/PBR-металл). ACES даёт
+  // мягкий плечевой спад у ярких бликов вместо обрезки — их площадь и резкость
+  // заметно меньше. Действует на ВСЕХ уровнях (безвредно для матовых Lambert), но
+  // заметнее всего там, где вообще есть яркие блики.
+  renderer.toneMapping = ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
 
   logGpuRenderer(renderer);
 
@@ -138,20 +169,77 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
   // ЧЁРНЫМ (у металла нет диффуза — только отражения), а стекло не ловит fresnel.
   // `RoomEnvironment` — лёгкая процедурная «студия»; PMREM генерится один раз.
   // Lambert-материалы города (здания/земля) envMap игнорируют → остаются матовыми.
+  //
+  // Sigma блюра 0.7 (было 0.04) — КЛЮЧЕВОЕ против «выжженного» пятна: в
+  // RoomEnvironment стоят area-лампы с HDR-яркостью до ~50, и почти плоская крыша
+  // купола отражала одну и ту же лампу всей площадью — никакие envMapIntensity/ACES
+  // не спасали (50×0.45≈22 — всё равно клип в белый, а на максимальном это ещё и
+  // корм для bloom → засветка на всю сцену). Сильный блюр размазывает лампы по
+  // сфере: пик падает на порядок, отражения становятся мягкими градиентами.
   const pmrem = new PMREMGenerator(renderer);
-  const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
+  const envRT = pmrem.fromScene(new RoomEnvironment(), 0.7);
   scene.environment = envRT.texture;
+  // Env светит ВО ВСЕ СТОРОНЫ и картой теней не затеняется — это «бестеневой»
+  // заполняющий свет, из-за которого тени на зданиях выцветали. Глушим его вдвое,
+  // контраст света/тени возвращаем направленному солнцу (интенсивность ниже).
+  scene.environmentIntensity = 0.5;
 
   // far большой: декор (родительский уровень) после origin shift раздут в 1/s и
   // выглядывает по краям холста — он должен оставаться в пределах отсечения.
   const camera = new PerspectiveCamera(50, 1, 0.1, 20000);
   camera.position.copy(INITIAL_CAMERA_POS);
 
-  // Свет: мягкая заливка + направленный, чтобы читались грани зданий.
-  scene.add(new AmbientLight(0xffffff, 0.6));
-  const sun = new DirectionalLight(0xffffff, 1.1);
-  sun.position.set(80, 200, 120);
+  // Свет: мягкая заливка + направленный, чтобы читались грани зданий. Солнце стоит
+  // под ~40° над горизонтом (не в зените): тени получаются ДЛИННЕЕ здания и явно
+  // «уходят» в сторону от источника — их видно между зданиями и на земле (при
+  // почти-зенитном свете тень пряталась под самим домом).
+  // Заливка ambient гасит контраст тени: там, где включён просчёт теней (высокий/
+  // максимальный), она ЗАМЕТНО слабее — тень освещена ТОЛЬКО ambient, и на 0.6 она
+  // читалась еле-еле (жалоба «тени почти не видны»). Без теней (мин/оптимальный)
+  // оставляем ambient как было — сдвигать общую яркость там незачем.
+  const AMBIENT_NORMAL = 0.6;
+  const AMBIENT_SHADOWED = 0.32;
+  const ambient = new AmbientLight(
+    0xffffff,
+    quality.active.shadows ? AMBIENT_SHADOWED : AMBIENT_NORMAL,
+  );
+  scene.add(ambient);
+  // Солнце — главный источник контраста свет/тень. 0.9 (при env, заглушенном до
+  // 0.5, см. environmentIntensity выше): освещённая сторона заметно ярче тени —
+  // тени на зданиях читаются, а не тонут в бестеневом env-заполнении. Специулярный
+  // блик солнца на стекле/лаке при этой интенсивности ACES дожимает без клипа.
+  const sun = new DirectionalLight(0xffffff, 0.9);
+  sun.position.set(80, 120, 120);
   scene.add(sun);
+  scene.add(sun.target); // цель в (0,0,0): фиксируем направление света и теней
+  // Тени направленного света (высокий/максимальный; `castShadow` включает сам
+  // просчёт). Ортокамера теней покрывает активный уровень (город центрирован в
+  // начале координат после origin-shift) + вылет длинных теней наружу; заполняющий
+  // ambient не даёт теням стать чёрными. bias/normalBias гасят «акне» на гранях
+  // инстансированных боксов; `radius` даёт мягкий (не рваный) край — у PCF это
+  // джиттер выборок, у VSM (максимальный) настоящий блюр карты, поэтому там радиус
+  // больше.
+  const SHADOW_EXTENT = 180; // полупролёт ортокамеры теней (мировые единицы)
+  const PCF_SHADOW_RADIUS = 4;
+  const VSM_SHADOW_RADIUS = 10;
+  const shadowRadius = () =>
+    quality.active.vsmShadows ? VSM_SHADOW_RADIUS : PCF_SHADOW_RADIUS;
+  sun.castShadow = quality.active.shadows;
+  sun.shadow.mapSize.set(4096, 4096);
+  sun.shadow.camera.left = -SHADOW_EXTENT;
+  sun.shadow.camera.right = SHADOW_EXTENT;
+  sun.shadow.camera.top = SHADOW_EXTENT;
+  sun.shadow.camera.bottom = -SHADOW_EXTENT;
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 900;
+  sun.shadow.bias = -0.0005;
+  // normalBias сдвигает точку выборки вдоль нормали — на 1.2 мировых единицы он
+  // «снимал» тень с самих зданий (высота от 4): контактные тени здание-на-здание
+  // исчезали, оставалась только тень на земле. Тексель карты ≈ 0.09 мировых единиц
+  // (4096 на пролёт 360) — 0.3 (~3 текселя) хватает против акне на гранях боксов.
+  sun.shadow.normalBias = 0.3;
+  sun.shadow.radius = shadowRadius();
+  sun.shadow.camera.updateProjectionMatrix();
 
   const content = new Group();
   scene.add(content);
@@ -281,15 +369,87 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
   window.addEventListener("keyup", onPanKeyUp);
   window.addEventListener("blur", onBlur);
 
+  // ── Постобработка (максимальный уровень, quality.active.post) ───────────────
+  // EffectComposer, цепочка RenderPass → GTAO → bloom → OutputPass.
+  //   - Таргет мультисемплим сами (samples=4, WebGL2): встроенный MSAA canvas при
+  //     рендере через композер не участвует. HalfFloat — HDR-конвейер, чтобы bloom
+  //     видел значения >1; OutputPass делает tone mapping + sRGB.
+  //   - GTAO — контактное затенение в стыках зданий/плит/земли; radius в мировых
+  //     единицах (здания — единицы…десятки при CITY_SPAN=200). Стеклянные купола
+  //     попадают в G-buffer как сплошные боксы — это осознанно: даёт контактную
+  //     тень по их периметру.
+  //   - Bloom с порогом 1.0 — светятся ТОЛЬКО HDR-света (блики env на стали,
+  //     стекле, лаке), диффузные цвета порога не достигают.
+  // Живёт/умирает в applyQuality при смене уровня; dispose — при размонтировании.
+  // (Экспериментальный WebGPU-уровень использует ОТДЕЛЬНЫЙ рендер — scene.webgpu.ts;
+  // сюда, в WebGL-сцену, он не заходит.)
+  let composer: EffectComposer | null = null;
+  let postPasses: { dispose(): void }[] = [];
+
+  function buildPost(): void {
+    const w = canvas.clientWidth || 1;
+    const h = canvas.clientHeight || 1;
+    composer = new EffectComposer(
+      renderer,
+      new WebGLRenderTarget(w, h, { samples: 4, type: HalfFloatType }),
+    );
+    composer.setPixelRatio(renderer.getPixelRatio());
+    composer.setSize(w, h);
+    const passes: { dispose(): void }[] = [];
+
+    const render = new RenderPass(scene, camera);
+    composer.addPass(render);
+    passes.push(render);
+
+    const gtao = new GTAOPass(scene, camera, w, h);
+    gtao.updateGtaoMaterial({
+      radius: 2.5, // мировые единицы — радиус «ощупывания» соседней геометрии
+      distanceExponent: 1,
+      thickness: 1,
+      scale: 1.2, // сила затенения
+      samples: 16,
+    });
+    composer.addPass(gtao);
+    passes.push(gtao);
+
+    // strength снижена (0.35 → 0.18): при добавленном ACES tone mapping (см. выше)
+    // сами блики уже мягче и не режутся в чистый белый, поэтому прежняя сила bloom
+    // поверх них давала избыточное разрастающееся свечение («жалоба на блики»).
+    const bloom = new UnrealBloomPass(new Vector2(w, h), 0.18, 0.4, 1.0);
+    composer.addPass(bloom);
+    passes.push(bloom);
+
+    const output = new OutputPass();
+    composer.addPass(output);
+    passes.push(output);
+
+    postPasses = passes;
+  }
+
+  function disposePost(): void {
+    if (!composer) return;
+    for (const p of postPasses) p.dispose();
+    postPasses = [];
+    composer.dispose(); // свои таргеты композера; пассы выше — отдельно
+    composer = null;
+  }
+
+  if (quality.active.post) buildPost();
+
   // Твины камеры (drill-зум) и покадровые колбэки слоёв крутятся в этом же rAF.
   const tweens = new TweenGroup();
   const frameCallbacks = new Set<() => void>();
 
-  /** Подогнать буфер рендера и аспект под фактический размер canvas. */
+  /** Подогнать буфер рендера (и композера) и аспект под фактический размер canvas. */
   function resize() {
     const w = canvas.clientWidth || 1;
     const h = canvas.clientHeight || 1;
     renderer.setSize(w, h, false);
+    if (composer) {
+      // pixelRatio первым: setSize композера умножает на него внутри.
+      composer.setPixelRatio(renderer.getPixelRatio());
+      composer.setSize(w, h);
+    }
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   }
@@ -306,7 +466,8 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
     applyZoom();
     controls.update();
     for (const cb of frameCallbacks) cb();
-    renderer.render(scene, camera);
+    if (composer) composer.render();
+    else renderer.render(scene, camera);
     requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
@@ -390,7 +551,23 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
       );
       renderer.transmissionResolutionScale =
         quality.active.transmissionResolutionScale;
-      resize(); // пере-применить размер буфера под новый pixelRatio
+      // Тени: переключаем проход, тип карты (PCF/VSM) и просчёт света. Материалы/
+      // меши уровня подхватят castShadow/receiveShadow и перекомпилируются под
+      // новый тип карты на пересборке города (следует сразу за applyQuality).
+      renderer.shadowMap.enabled = quality.active.shadows;
+      renderer.shadowMap.type = quality.active.vsmShadows
+        ? VSMShadowMap
+        : PCFShadowMap;
+      sun.castShadow = quality.active.shadows;
+      sun.shadow.radius = shadowRadius();
+      ambient.intensity = quality.active.shadows
+        ? AMBIENT_SHADOWED
+        : AMBIENT_NORMAL;
+      // Постобработка: композер пересобираем ЦЕЛИКОМ (не только вкл/выкл) под новый
+      // размер/pixelRatio. Пересборка на смене уровня дёшева и не каждокадрова.
+      disposePost();
+      if (quality.active.post) buildPost();
+      resize(); // пере-применить размер буфера (и композера) под новый pixelRatio
     },
     resetView(ms) {
       if (ms && ms > 0) {
@@ -409,6 +586,7 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
       window.removeEventListener("blur", onBlur);
       observer.disconnect();
       controls.dispose();
+      disposePost();
       envRT.dispose();
       pmrem.dispose();
       renderer.dispose();

@@ -95,9 +95,19 @@ export const GRAPHICS_ORDER: {
     sub: "Матовое стекло куполов и металл плит, сбалансированная нагрузка.",
   },
   {
+    level: "high",
+    label: "Высокий",
+    sub: "Мягкие тени, улучшенное стекло куполов, полное разрешение стекла и пикселей.",
+  },
+  {
     level: "maximal",
     label: "Максимальный",
-    sub: "Полное разрешение стекла и пикселей, гладкая тесселяция.",
+    sub: "Всё из высокого + контактное затенение и свечение бликов (постобработка), VSM-тени, лак на металле.",
+  },
+  {
+    level: "experimental",
+    label: "Экспериментальный (WebGPU)",
+    sub: "Отдельный рендер на WebGPU: матовое стекло куполов, SSGI (экранное глобальное освещение), контрастные тени и полуотражающий пол. Требует поддержки WebGPU; при недоступности откатывается на «Максимальный». Сцена пересоздаётся при переключении.",
   },
 ];
 
@@ -125,11 +135,15 @@ function initialGraphics(): GraphicsLevel {
 export const graphicsLevel = atom<GraphicsLevel>(initialGraphics());
 setActiveQuality(graphicsLevel.get());
 
-/** Сменить уровень графики: стор + зеркало в `quality.active` + сохранение.
- *  Применение (рендер-параметры + пересборка города) делает подписчик в сцене. */
+/** Сменить уровень графики: зеркало в `quality.active` + стор + сохранение.
+ *  Применение (рендер-параметры + пересборка города) делает подписчик в сцене.
+ *  `setActiveQuality` — СТРОГО до `set`: nanostores зовёт подписчиков синхронно,
+ *  и `applyQuality()` сцены читает `quality.active` прямо из подписчика — при
+ *  обратном порядке рендер получал параметры ПРЕДЫДУЩЕГО уровня (тени на
+ *  максимальном не включались, а на смене вниз вспыхивали на кадр). */
 export function setGraphicsLevel(level: GraphicsLevel): void {
-  graphicsLevel.set(level);
   setActiveQuality(level);
+  graphicsLevel.set(level);
   try {
     localStorage.setItem(GRAPHICS_KEY, level);
   } catch {

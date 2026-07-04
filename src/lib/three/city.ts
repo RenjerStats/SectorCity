@@ -47,6 +47,7 @@ import {
   Color,
   Float32BufferAttribute,
   Group,
+  DoubleSide,
   InstancedMesh,
   Matrix4,
   type Material,
@@ -60,6 +61,10 @@ import {
   Vector3,
 } from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
+// Node-ветка three — ТОЛЬКО для WebGPU-бэкенда (полуотражающий пол): статический
+// импорт не дороже, чем есть (Scene.svelte и так статически тянет scene.webgpu).
+import { MeshBasicNodeMaterial } from "three/webgpu";
+import { attribute, color as tslColor, float, reflector } from "three/tsl";
 import { hierarchy, treemap, treemapSquarify } from "d3-hierarchy";
 import type { Category, ScanNode } from "../ipc/contract";
 import {
@@ -746,13 +751,26 @@ function makeDomeGeometry(): RoundedBoxGeometry {
   return makeRoundedUnitCube();
 }
 
+/** Объёмное поглощение стекла (glassExtras): холодный тинт, набираемый в толще. */
+const GLASS_ATTENUATION_COLOR = 0xbfd3d9;
+/** Дистанция поглощения (мировые ед.): на толщине купола тинт едва заметен. */
+const GLASS_ATTENUATION_DISTANCE = 40;
+/** Хроматическая дисперсия преломления — лёгкая «радужность» краёв купола. */
+const GLASS_DISPERSION = 0.35;
+
 /**
- * Материал стеклянного купола. На `frostedGlass=true` (оптимальный/максимальный) —
+ * Материал стеклянного купола. На `frostedGlass=true` (оптимальный и выше) —
  * настоящее матовое стекло (§II.3.7): `transmission` + `roughness` морозят прошедший
  * свет (требует env-map, см. `scene.ts`); `flight=false` даёт `depthWrite:true`
  * (купол-vs-купол пофрагментно), цвет per-instance. На `frostedGlass=false`
  * (минимальный) — ДЕШЁВАЯ полупрозрачность (`MeshLambertMaterial` + opacity), без
  * второго прохода transmission: застройка просто просвечивает сквозь стекло.
+ *
+ * `glassExtras` (высокий/максимальный) добавляет к морозу: объёмное поглощение
+ * (`attenuation*` — толща получает глубину цвета), `dispersion` (радужное
+ * преломление на краях) и `clearcoat` (глянцевый лаковый слой поверх мороза —
+ * чёткие блики env при матовом нутре). Всё это — свойства уже включённого
+ * transmission-прохода, отдельной цены почти не имеет.
  *
  * Возвращаемый тип — объединение: оба класса несут `.color`/`.opacity`, чего
  * достаточно вызывающим (`applyDomeProgress`, decor-dim, per-instance тинт).
@@ -768,8 +786,29 @@ function makeDomeMaterial(
       thickness: 6,
       ior: 1.45,
       transparent: true,
+      // Как в оф. примере webgpu_materials_transmission: обе грани преломляют —
+      // тонкое стекло купола читается насквозь корректно (иначе задняя стенка
+      // выпадает и преломление выглядит «плоским»/перемешанным).
+      side: DoubleSide,
       depthWrite: !flight,
+      // Без явного envMapIntensity (default 1) почти зеркальное стекло ловит
+      // отражение окружения (RoomEnvironment) в полную силу — «выжженный» блик даже
+      // без clearcoat (жалоба «блики сильные и на optimal/high»). 0.45 держит
+      // отражение узнаваемым, но не белым пятном на пол-купола.
+      envMapIntensity: 0.45,
     });
+    if (quality.active.glassExtras) {
+      mat.ior = 1.5; // чуть плотнее френель по краям
+      mat.attenuationColor = new Color(GLASS_ATTENUATION_COLOR);
+      mat.attenuationDistance = GLASS_ATTENUATION_DISTANCE;
+      // Полный набор без гейта по backend: проверяли на WebGPU при прямом
+      // рендере (post=false) — вид не устроил и там, поэтому experimental просто
+      // держит `glassExtras:false` в пресете (см. quality.ts), а не режет набор
+      // здесь. На WebGL-high/maximal — как подбиралось изначально.
+      mat.clearcoat = 0.5;
+      mat.clearcoatRoughness = 0.3;
+      mat.dispersion = GLASS_DISPERSION;
+    }
     if (flight) mat.color.set(GLASS_COLOR);
     return mat;
   }
@@ -789,13 +828,36 @@ function makeDomeMaterial(
  * Материал плиты-постамента папки. На PBR — металл (+1/+2) либо матовый PBR (+3),
  * читаемые за счёт отражений env-map. На минимальном уровне — дешёвый Lambert без
  * металла (per-instance цвет-район сохраняется). `metal` различает +1/+2 vs +3.
+ * `clearcoatMetal` (максимальный) кладёт поверх металла лаковый слой — плита
+ * читается «полированной»: чёткий блик clearcoat поверх металлических отражений.
  */
 function makeBaseMaterial(
   metal: boolean,
 ): MeshStandardMaterial | MeshLambertMaterial {
   if (!quality.active.pbr) return new MeshLambertMaterial();
+  // envMapIntensity явно снижен (default 1 без него): металл 0.9 при полной силе
+  // env-отражения даёт такой же «выжженный» блик, как у стекла купола (см.
+  // makeDomeMaterial) — этой плите он тоже был не нужен на всех PBR-уровнях.
+  // metalness 0.7 (было 0.9): у чистого металла нет диффуза — тень на плите гасит
+  // только зеркальный вклад солнца и видна ЛИШЬ под углами, где его лоб попадает в
+  // камеру (жалоба «тени пропадают при повороте на 15–20°»). 0.3 диффуза хватает,
+  // чтобы тень читалась с любого ракурса, металлический характер сохраняется.
+  // roughness 0.5 (было 0.35) заодно гасит «искристую пилу» острого спекуляра на
+  // дальней дистанции (алиасинг субпиксельных бликов).
+  if (metal && quality.active.clearcoatMetal)
+    return new MeshPhysicalMaterial({
+      metalness: 0.7,
+      roughness: 0.5,
+      envMapIntensity: 0.5,
+      clearcoat: 0.5,
+      clearcoatRoughness: 0.3,
+    });
   return metal
-    ? new MeshStandardMaterial({ metalness: 0.9, roughness: 0.35 })
+    ? new MeshStandardMaterial({
+        metalness: 0.7,
+        roughness: 0.5,
+        envMapIntensity: 0.5,
+      })
     : new MeshStandardMaterial({ metalness: 0, roughness: 0.6 });
 }
 
@@ -915,7 +977,12 @@ export function buildLevel(
 
   // Земля — большой матовый «апрон» вокруг города с радиальным угасанием цвета к
   // краям.
+  // Тени (высокий/максимальный): земля их принимает, здания/плиты отбрасывают.
+  // Флаг читаем один раз на сборку — согласован с `renderer.shadowMap.enabled`.
+  const shadows = quality.active.shadows;
+
   const ground = makeFadedGround(span);
+  ground.receiveShadow = shadows;
   group.add(ground);
   // Dot-grid земли (vision §II.4) — регулярная мировая сетка точек по всему апрону,
   // включая площадь под городом (в зазорах между зданиями читается как «текстура
@@ -965,6 +1032,8 @@ export function buildLevel(
     for (const [cat, list] of byCat) {
       const def = makeBuildingDef(cat);
       const mesh = new InstancedMesh(def.geometry, def.materials, list.length);
+      mesh.castShadow = shadows;
+      mesh.receiveShadow = shadows;
       const items: BuildItem[] = [];
       const real: Matrix4[] = [];
       const pick: PickInfo[] = [];
@@ -1045,12 +1114,17 @@ export function buildLevel(
       makeBaseMaterial(true),
       districts.length,
     );
+    baseMesh.castShadow = shadows;
+    baseMesh.receiveShadow = shadows;
     // Матовая плита вложенных папок +3 (без металлики) — глубинная детализация.
     baseMatteMesh = new InstancedMesh(
       makeRoundedUnitCube(),
       makeBaseMaterial(false),
       districts.length,
     );
+    baseMatteMesh.castShadow = shadows;
+    baseMatteMesh.receiveShadow = shadows;
+    // Купола-стекло тени НЕ отбрасывают/принимают (полупрозрачные, дали бы грязь).
 
     districts.forEach((d, j) => {
       const full = layoutToWorld(d.rect, 0); // footprint района целиком (под плиту)
@@ -1510,10 +1584,35 @@ function groundFade(x: number, z: number, half: number): number {
   return smoothstep01((r - 0.35) / 0.6);
 }
 
+/** Пиковая сила отражения пола (центр города); к краю апрона гаснет в 0. */
+const GROUND_REFLECT = 0.16;
+
+/**
+ * Виньетка земли на WebGPU-бэкенде: до какой доли радиальной кривой `groundFade`
+ * земля ПОЛНОСТЬЮ растворяется в фон (0.75 → полный фон уже на ¾ прежней кривой,
+ * т.е. заметно раньше края апрона). Дистанция от камеры НЕ участвует (пробовали —
+ * не то): затемнение статично относительно центра земли, как на WebGL-уровнях,
+ * просто жёстче и гарантированно до конца.
+ */
+const GROUND_VIGNETTE_FULL = 0.75;
+
 /**
  * Земля-«апрон»: большой матовый план вокруг города (×GROUND_APRON), цвет
  * радиально гаснет к краям из `GROUND_COLOR` в `GROUND_EDGE_COLOR` (=--bg) через
  * vertex-colors — у города нет «парящего» острого края, он тает в фон.
+ *
+ * На WebGPU-бэкенде пол НЕОСВЕЩАЕМЫЙ (unlit) и ПОЛУОТРАЖАЮЩИЙ:
+ *   - цвет = запечённый радиальный градиент (vertex colors) — земля не реагирует
+ *     на контрастный свет уровня (см. коммент в ветке ниже: солнце/env/SSGI
+ *     делали её серой, ярче maximal'а);
+ *   - `reflector()` (плоское зеркало, рендер сцены из отражённой камеры в
+ *     полразрешения) — «мокрый» отсвет города, сила `GROUND_REFLECT`;
+ *   - всё лерпится в чистый `GROUND_EDGE_COLOR` (=--bg) виньеткой `toBg` от
+ *     центра земли (ужатая кривая aFade, полный фон на `GROUND_VIGNETTE_FULL`
+ *     её доли) — как на maximal, статично относительно земли.
+ * RT рефлектора живёт вне материала → его `dispose` — через
+ * `userData.disposeExtra` (см. `disposeGroup`). Невидимая земля (setGroundShown)
+ * рефлектором не рендерится.
  */
 function makeFadedGround(span: LevelSpan): Mesh {
   const S = Math.max(span.w, span.d) * GROUND_APRON;
@@ -1522,6 +1621,8 @@ function makeFadedGround(span: LevelSpan): Mesh {
   const edge = new Color(GROUND_EDGE_COLOR);
   const pos = geo.attributes.position;
   const colors = new Float32Array(pos.count * 3);
+  const webgpu = quality.active.backend === "webgpu";
+  const fadeArr = webgpu ? new Float32Array(pos.count) : null;
   const half = S / 2;
   const c = new Color();
   for (let i = 0; i < pos.count; i++) {
@@ -1531,9 +1632,44 @@ function makeFadedGround(span: LevelSpan): Mesh {
     colors[i * 3] = c.r;
     colors[i * 3 + 1] = c.g;
     colors[i * 3 + 2] = c.b;
+    if (fadeArr) fadeArr[i] = t;
   }
   geo.setAttribute("color", new Float32BufferAttribute(colors, 3));
-  const ground = new Mesh(geo, new MeshLambertMaterial({ vertexColors: true }));
+  let material: Material;
+  let ground: Mesh;
+  if (fadeArr) {
+    // Кривую угасания несёт атрибут aFade (0 центр → 1 край), из него в шейдере
+    // выводится и сила отражения, и «плавное затемнение» периферии.
+    geo.setAttribute("aFade", new Float32BufferAttribute(fadeArr, 1));
+    // Пол НЕ ОСВЕЩАЕТСЯ (unlit Basic) — итог долгой охоты за «серой землёй»:
+    // контрастный свет уровня (солнце 1.35 против 0.9 на maximal) заливал
+    // горизонтальную плоскость в ~1.5 раза ярче, env добавлял френель-отблеск на
+    // скользящих углах, SSGI — переотражение; виньетка не перекрывала подсветку
+    // ВСЕЙ площади. Уходим от света целиком: цвет = ЗАПЕЧЁННЫЙ радиальный
+    // градиент (визуально тот же, что даёт Lambert на WebGL-уровнях) + отражение
+    // города, и всё это лерпится в чистый --bg виньеткой от центра земли.
+    // Цена: тени на землю не падают (на почти чёрной земле maximal их и так не
+    // видно; тени на плитах/зданиях живут) и SSGI землю не трогает.
+    const mat = new MeshBasicNodeMaterial();
+    const toBg = attribute("aFade", "float").smoothstep(
+      0,
+      GROUND_VIGNETTE_FULL,
+    );
+    const reflNode = reflector({ resolutionScale: 0.5 });
+    mat.colorNode = attribute("color", "vec3")
+      .add(reflNode.rgb.mul(float(GROUND_REFLECT)))
+      .mul(toBg.oneMinus())
+      .add(tslColor(GROUND_EDGE_COLOR).mul(toBg));
+    material = mat;
+    ground = new Mesh(geo, material);
+    // target задаёт плоскость отражения: дитё пола наследует его поворот/рибейз
+    // навигатора (G⁻¹), зеркало всегда совпадает с землёй.
+    ground.add(reflNode.target);
+    ground.userData.disposeExtra = () => reflNode.dispose();
+  } else {
+    material = new MeshLambertMaterial({ vertexColors: true });
+    ground = new Mesh(geo, material);
+  }
   ground.rotation.x = -Math.PI / 2; // в плоскость XZ
   ground.position.y = -0.3; // чуть ниже основания зданий и подиума
   return ground;
@@ -1616,6 +1752,10 @@ function disposeGroup(group: Group): void {
   };
   for (const child of [...group.children]) {
     group.remove(child);
+    // Ресурсы вне geometry/material (RT рефлектора пола) — хук disposeExtra.
+    if (typeof child.userData.disposeExtra === "function") {
+      child.userData.disposeExtra();
+    }
     if (child instanceof InstancedMesh || child instanceof Mesh) {
       child.geometry.dispose();
       const mat = child.material;
