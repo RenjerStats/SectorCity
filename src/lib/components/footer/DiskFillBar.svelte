@@ -11,14 +11,12 @@
   import type { Category } from "../../ipc/contract";
   import type { LevelSummary } from "../../store/ui";
   import { CATEGORY_COLOR, CATEGORY_LABEL } from "../../three/palette";
+  import { formatSize } from "../../format";
 
   let { summary }: { summary: LevelSummary | null } = $props();
 
   function hex(n: number): string {
     return "#" + n.toString(16).padStart(6, "0");
-  }
-  function gb(bytes: number): string {
-    return (bytes / 1e9).toFixed(1);
   }
 
   /** Сегменты в порядке убывания доли; пустые категории отброшены. */
@@ -33,7 +31,7 @@
         pct: (bytes / summary.totalBytes) * 100,
         color: hex(CATEGORY_COLOR[cat]),
         label: CATEGORY_LABEL[cat],
-        gb: gb(bytes),
+        size: formatSize(bytes),
       }));
   });
 </script>
@@ -41,13 +39,13 @@
 <div class="fill">
   {#if summary && summary.totalBytes > 0}
     <!-- KPI-итог привязан к полосе (число описывает именно её), dot-matrix §II.8. -->
-    <span class="total">{gb(summary.totalBytes)} ГБ</span>
+    <span class="total">{formatSize(summary.totalBytes)}</span>
     <div class="bar" aria-label="Заполнение уровня по категориям">
       {#each segments as s (s.cat)}
         <div
           class="seg"
           style="width:{s.pct}%; background:{s.color}"
-          title="{s.label}: {s.gb} ГБ ({s.pct.toFixed(0)}%)"
+          title="{s.label}: {s.size} ({s.pct.toFixed(0)}%)"
         ></div>
       {/each}
     </div>
@@ -65,7 +63,7 @@
             <span
               class="mini-dot"
               style="background:{s.color}"
-              title="{s.label}: {s.gb} ГБ ({s.pct.toFixed(0)}%)"
+              title="{s.label}: {s.size} ({s.pct.toFixed(0)}%)"
             ></span>
           {/each}
         </span>
