@@ -64,8 +64,8 @@ function adapterLabel(
 /**
  * Асинхронно проверить WebGPU: наличие `navigator.gpu` + реальный адаптер.
  * `high-performance` просит дискретную GPU (на ноутбуках с переключаемой графикой);
- * получить адаптер, впрочем, — ещё не гарантия, что WebView2 отдаст именно dGPU
- * (см. `docs`/память по форсу дискретной карты), но имя адаптера это покажет.
+ * получить адаптер, впрочем, — ещё не гарантия, что WebView2 отдаст именно dGPU,
+ * но имя адаптера это покажет.
  */
 export async function probeWebGpu(): Promise<WebGpuCapability> {
   const gpu = getGpu();

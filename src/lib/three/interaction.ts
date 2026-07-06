@@ -2,12 +2,12 @@
  * Слой взаимодействия: наведение (raycast), обводка наведённого здания
  * (highlight-mesh) и клик-drill по районам. Императивная часть 3D-мира.
  *
- * Архитектура (docs §1, §5): picking — CPU raycast с rAF-троттлингом (обработка
- * не чаще кадра). Raycast идёт по нескольким `InstancedMesh` уровня (здания,
- * плоты, силуэты районов — `CityView.pickMeshes`); попадание разрешается в узел и
- * цель drill через `CityView.resolvePick`. Обводка одного инстанса через
- * OutlinePass невозможна — держим ОДИН highlight-mesh (рёбра бокса) и ставим его
- * трансформ = матрице наведённого инстанса того меша, в который попали (docs §5.1).
+ * Picking — CPU raycast с rAF-троттлингом (обработка не чаще кадра). Raycast идёт
+ * по нескольким `InstancedMesh` уровня (здания, плоты, силуэты районов —
+ * `CityView.pickMeshes`); попадание разрешается в узел и цель drill через
+ * `CityView.resolvePick`. Обводка одного инстанса через OutlinePass невозможна —
+ * держим ОДИН highlight-mesh (рёбра бокса) и ставим его трансформ = матрице
+ * наведённого инстанса того меша, в который попали.
  *
  * Контакт с DOM — только через колбэки, которые владелец заворачивает в стор.
  * Прямой связи raycaster ↔ DOM нет.
@@ -56,7 +56,7 @@ export interface InteractionCallbacks {
    *  чтобы не путать пользователя; пометка также доступна через ПКМ-меню. */
   onMark(node: ScanNode): void;
   /**
-   * ПКМ по узлу (vision §I.10): открыть контекстное меню. `info` — узел под
+   * ПКМ по узлу: открыть контекстное меню. `info` — узел под
    * курсором и его цель-drill (район), либо `null` (клик мимо зданий → меню не
    * нужно). `x`/`y` — экранные координаты курсора для позиционирования меню.
    */
@@ -170,8 +170,8 @@ export function setupInteraction(
   const cursorLight = new PointLight(THEMES_3D[theme.get()].accent, 0, 75);
   handle.add(cursorLight);
 
-  // Обводка следует за темой (стор-мост, docs §1): при смене темы перекрашиваем
-  // акцент визира. subscribe шлёт текущее значение сразу — цвет всегда актуален.
+  // Обводка следует за темой: при смене темы перекрашиваем акцент визира.
+  // subscribe шлёт текущее значение сразу — цвет всегда актуален.
   const unsubTheme = theme.subscribe((name) => {
     const accentColor = THEMES_3D[name].accent;
     highlightMat.color.setHex(accentColor);
@@ -328,7 +328,7 @@ export function setupInteraction(
   }
 
   // rAF-троттлинг: тяжёлый raycast делаем максимум раз в кадр и только если
-  // указатель двигался (docs §5.2).
+  // указатель двигался.
   const offFrame = handle.onFrame(() => {
     if (!dirty) return;
     dirty = false;
@@ -372,7 +372,7 @@ export function setupInteraction(
   }
 
   /** ПКМ: разрешить узел под курсором (точно по координатам события) и открыть
-   *  контекстное меню (vision §I.10). Не трогает выбор/наведение — это отдельный
+   *  контекстное меню. Не трогает выбор/наведение — это отдельный
    *  канал. Браузерное меню подавляем (`preventDefault`). */
   function onContextMenu(e: MouseEvent): void {
     e.preventDefault();

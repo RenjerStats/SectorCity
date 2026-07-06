@@ -1,8 +1,7 @@
 //! SectorCity — Rust-бэкенд.
 //!
 //! Поток данных: `Scanner(jwalk) → Aggregator(rayon) → Snapshot(SQLite)
-//! → IPC(Tauri) → фронт`. Сбоку — `Classifier`. Здесь, в фазе 0, собран
-//! каркас: модули, ошибки, контракт IPC и команды-заглушки.
+//! → IPC(Tauri) → фронт`. Сбоку — `Classifier`.
 
 mod classify;
 mod error;
@@ -62,8 +61,8 @@ pub fn run() {
             std::thread::spawn(gpu::ensure_high_performance_gpu);
 
             // Переоткрытие без рескана: если снимок есть — поднимаем его в стейт.
-            // Чтение SQLite уносим в blocking-пул (план §1.1): на большом снимке
-            // синхронная загрузка здесь держала показ окна. Пока фон читает, флаг
+            // Чтение SQLite уносим в blocking-пул: на большом снимке синхронная
+            // загрузка здесь держала бы показ окна. Пока фон читает, флаг
             // `snapshot_loading` заставляет `current_root` отвечать «ещё не готов»;
             // по завершении летит `snapshot://ready` с корнем (или null).
             let handle = app.handle().clone();

@@ -3,8 +3,8 @@
  *
  * Регресс-тест бага «после drill вся папка — один блок»: проверяем, что у
  * активного уровня ПОСЛЕ drill видна вложенная застройка (раньше декор накрывал
- * активный уровень). Детализация теперь задаётся ГЛУБИНОЙ, а не расстоянием
- * (vision §II.3.2): купола +1 и их домики видны при любой позиции камеры.
+ * активный уровень). Детализация задаётся ГЛУБИНОЙ, а не расстоянием: купола +1
+ * и их домики видны при любой позиции камеры.
  *
  * Сцена не нужна (WebGL/DOM): `navigator` зависит от `SceneHandle` только по типу
  * (`import type`) и каноническая поза вынесена в `home.ts`. Подсовываем фейковую
@@ -130,7 +130,7 @@ describe("createNavigator: reset / drill / up", () => {
     await nav.drill(nodeA, nodeA.children!, 0);
 
     // Купола +1 (/a/x, /a/y) и их домики видны при ЛЮБОЙ позиции камеры —
-    // детализация по глубине, не по расстоянию (vision §II.3.2).
+    // детализация по глубине, не по расстоянию.
     const far = buildingsVisibleAt(handle, nav, FAR);
     const near = buildingsVisibleAt(handle, nav, NEAR_ORIGIN);
     expect(far).toBeGreaterThan(0);
@@ -280,7 +280,7 @@ describe("createNavigator: reset / drill / up", () => {
       "/a/b",
       "/a",
     ]);
-    // Бюджет каждого слоя = budgetFromS(S_k) (план §5). Цепочка из одиночных детей —
+    // Бюджет каждого слоя = budgetFromS(S_k). Цепочка из одиночных детей —
     // СЛАБЫЕ drill'ы (s≈1, S_k≈1), поэтому глубина держится: бюджеты остаются полными.
     expect(info.decor.map((x) => x.budget)).toEqual(
       info.decor.map((x) => budgetFromS(x.S)),
@@ -311,7 +311,7 @@ describe("createNavigator: reset / drill / up", () => {
       "/a",
       "root",
     ]);
-    // Дочитанный дальний слой получает бюджет по своему S_k (§5).
+    // Дочитанный дальний слой получает бюджет по своему S_k.
     expect(info.decor.map((x) => x.budget)).toEqual(
       info.decor.map((x) => budgetFromS(x.S)),
     );
@@ -325,7 +325,7 @@ describe("createNavigator: reset / drill / up", () => {
     rootLevel.dispose();
     expect(info.decor[info.decor.length - 1].S).toBeCloseTo(aSBefore / sA, 4);
 
-    // Дочит проявляется ФЕЙДОМ: показанное затемнение стартует с 0 (из фона, §6/§7),
+    // Дочит проявляется ФЕЙДОМ: показанное затемнение стартует с 0 (из фона),
     // а покадровый фейд доводит его до цели colorFactorFromS(S).
     expect(info.decor[info.decor.length - 1].dim).toBe(0);
     nav.updateFade(10000);
