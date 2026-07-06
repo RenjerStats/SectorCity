@@ -762,7 +762,10 @@ function domeHeight(d: DistrictAcc): number {
  */
 function domeGlassInset(fullSide: number): number {
   const margin = CONTENT_MARGIN_FRAC * fullSide;
-  return Math.max(0, Math.min(DOME_FOOTPRINT_INSET, margin - DOME_GLASS_CLEARANCE));
+  return Math.max(
+    0,
+    Math.min(DOME_FOOTPRINT_INSET, margin - DOME_GLASS_CLEARANCE),
+  );
 }
 
 /** Высота из устаревания: чем старше mtime, тем выше (канал «устаревание»). */
@@ -1140,7 +1143,28 @@ function releasePooledMesh(mesh: InstancedMesh): boolean {
     disposePooledDeep(entry); // сменилось качество, пока меш был в уровне
     return true;
   }
-  meshPool.get(mesh.userData.poolKind as string)?.push(entry);
+  const pool = meshPool.get(mesh.userData.poolKind as string);
+  if (pool) {
+    // СТРАХОВКА от двойного возврата: дубликат записи в пуле означал бы, что
+    // один и тот же InstancedMesh выдадут ДВУМ живым уровням — второй украдёт
+    // меш у первого (`group.add` репарентит), и пикинг обоих рассыпается
+    // (луч сквозь купола, чужие узлы под курсором, мёртвые здания).
+    if (pool.includes(entry)) {
+      console.warn("meshPool: повторный возврат меша проигнорирован", {
+        kind: mesh.userData.poolKind,
+      });
+      return true;
+    }
+    // Меш, который всё ещё смонтирован в чью-то группу, возвращать нельзя —
+    // это признак того же класса ошибки (release при живом владельце).
+    if (mesh.parent) {
+      console.warn("meshPool: возврат смонтированного меша отклонён", {
+        kind: mesh.userData.poolKind,
+      });
+      return true;
+    }
+    pool.push(entry);
+  }
   return true;
 }
 
@@ -1551,6 +1575,7 @@ export function createDomeFlight(
   group.add(mesh);
 
   const dummy = new Object3D();
+  let disposed = false;
   const liftBy = descs.map((d) => d.sy * DOME_LIFT_FACTOR);
   const writeMatrices = (rise: number): void => {
     descs.forEach((d, i) => {
@@ -1570,6 +1595,10 @@ export function createDomeFlight(
       material.opacity = domeOpacity(t); // общий для роя — все тают одной кривой
     },
     dispose() {
+      // Идемпотентно: повторный dispose (гонка твинов drill/up) не должен
+      // вернуть меш в пул второй раз — это делит его между живыми уровнями.
+      if (disposed) return;
+      disposed = true;
       // Меш возвращается в пул (геометрия/материал общие кэшированные — живут).
       group.remove(mesh);
       releasePooledMesh(mesh);
@@ -1779,8 +1808,10 @@ export function buildLevel(
       if (d.d3depth === 1) {
         // Плита — по КОНСТАНТНОМУ инсету (габарит не зависит от размера района →
         // соседние плиты не слипаются даже у мелких куполов).
-        baseW = Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2) + RING_RIM * 2;
-        baseD = Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2) + RING_RIM * 2;
+        baseW =
+          Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2) + RING_RIM * 2;
+        baseD =
+          Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2) + RING_RIM * 2;
 
         // Стеклянный купол: накрывает поднятое содержимое (footprint утоплен).
         // Инсет стекла АДАПТИВНЫЙ по осям — у мелких/узких куполов тянется наружу,
@@ -1968,6 +1999,7 @@ export function buildLevel(
         g.mesh.setMatrixAt(i, hide ? ZERO_MATRIX : g.real[i]);
       });
       g.mesh.instanceMatrix.needsUpdate = true;
+      g.mesh.boundingSphere = null; // инстансы двигались — сфера для raycast устарела
       dimBuilding(g, decorDim);
     }
     if (domeMesh && baseMesh && baseMatteMesh) {
@@ -1995,6 +2027,9 @@ export function buildLevel(
       domeMesh.instanceMatrix.needsUpdate = true;
       baseMesh.instanceMatrix.needsUpdate = true;
       baseMatteMesh.instanceMatrix.needsUpdate = true;
+      domeMesh.boundingSphere = null;
+      baseMesh.boundingSphere = null;
+      baseMatteMesh.boundingSphere = null;
       dimMesh(domeMesh, decorDim);
       dimMesh(baseMesh, decorDim);
       dimMesh(baseMatteMesh, decorDim);
@@ -2009,6 +2044,7 @@ export function buildLevel(
     for (const g of buildGroups) {
       g.items.forEach((_, i) => g.mesh.setMatrixAt(i, g.real[i]));
       g.mesh.instanceMatrix.needsUpdate = true;
+      g.mesh.boundingSphere = null; // инстансы двигались — сфера для raycast устарела
       dimBuilding(g, 1); // вернуть эталонные цвета материалов групп
     }
     if (domeMesh && baseMesh && baseMatteMesh) {
@@ -2020,6 +2056,9 @@ export function buildLevel(
       domeMesh.instanceMatrix.needsUpdate = true;
       baseMesh.instanceMatrix.needsUpdate = true;
       baseMatteMesh.instanceMatrix.needsUpdate = true;
+      domeMesh.boundingSphere = null;
+      baseMesh.boundingSphere = null;
+      baseMatteMesh.boundingSphere = null;
       whiten(domeMesh);
       whiten(baseMesh);
       whiten(baseMatteMesh);
@@ -2038,6 +2077,7 @@ export function buildLevel(
     // Спрятать инстанс купола в общем меше — его место займёт отдельный меш.
     domeMesh.setMatrixAt(j, ZERO_MATRIX);
     domeMesh.instanceMatrix.needsUpdate = true;
+    domeMesh.boundingSphere = null;
 
     // Отдельный полупрозрачный купол (материал/геометрия — общие, см. makeDome*).
     const mat = getCachedDomeMaterial("flightSingle");
@@ -2085,6 +2125,7 @@ export function buildLevel(
       domeMesh!.setMatrixAt(j, shown ? domeReal[j] : ZERO_MATRIX);
     });
     domeMesh.instanceMatrix.needsUpdate = true;
+    domeMesh.boundingSphere = null;
   }
 
   /** Затемнение периметра «на входе» (drill), кроме раскрываемого поддерева — см.
@@ -2184,7 +2225,9 @@ export function buildLevel(
       groundDots.visible = visible;
     },
     setActive() {
-      if (!isDecor) return;
+      // Без раннего выхода по `!isDecor`: applyActive() идемпотентен, а безусловное
+      // восстановление матриц лечит уровень, чьё состояние разъехалось (двойной
+      // промоут, пересборка в полёте) — иначе битые матрицы живут до пересоздания сцены.
       isDecor = false;
       excludedIdx = null;
       decorBudget = PREVIEW_MAX_DEPTH;

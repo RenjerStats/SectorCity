@@ -349,6 +349,18 @@
     if (crumbs.length === 0) return;
     const path = crumbs[crumbs.length - 1].path;
     const nodes = await getLevel(path, aggSpec(), PREVIEW_DEPTH);
+    // Перепроверка ПОСЛЕ await: за время IPC мог начаться зум (drill/крошка) —
+    // rebuildActive в полёте твина снёс бы уровень, обещанный свопу (двойной
+    // возврат мешей в пул → сломанный пикинг). Повторим после зума.
+    const modeNow = appMode.get();
+    if (modeNow.kind === "zooming" || modeNow.kind === "scanning") {
+      scheduleReaggregate();
+      return;
+    }
+    // Уровень успел смениться (drill уже загрузил свежие данные) — наш ответ устарел.
+    const crumbsNow = breadcrumbs.get();
+    if (crumbsNow.length === 0 || crumbsNow[crumbsNow.length - 1].path !== path)
+      return;
     currentUnfilteredNodes = nodes;
     const filtered = getFilteredNodes(nodes);
     nav.rebuildActive(filtered);
@@ -367,11 +379,23 @@
     aggTimer = setTimeout(() => void reaggregate(), AGG_DEBOUNCE_MS);
   }
 
+  /** Структурная пересборка запрошена во время зума — выполнить по его концу
+   *  (флаг сбрасывает подписчик appMode в onMount). */
+  let structuralRebuildPending = false;
+
   /** Пересобрать активный уровень из текущих структурных фильтров (категории /
    *  скрытие мелочи) БЕЗ перезапроса бэка — данные уровня уже в
    *  `currentUnfilteredNodes`. Зовётся при изменении любого структурного фильтра. */
   function rebuildFromFilters() {
     if (!nav) return;
+    // Во время зума пересборку ОТКЛАДЫВАЕМ: rebuildActive снёс бы уровень,
+    // который твин по прилёте превращает в декор — двойной возврат мешей в пул
+    // ломает пикинг (см. гард в navigator.rebuildActive). Хоткеи фильтров
+    // (1–8, «0», H) легко попадают в окно твина при активной навигации.
+    if (appMode.get().kind === "zooming") {
+      structuralRebuildPending = true;
+      return;
+    }
     nav.rebuildActive(getFilteredNodes(currentUnfilteredNodes));
     updateFilterEmpty(currentUnfilteredNodes);
     interaction?.clearHover();
@@ -769,6 +793,16 @@
       }
     });
 
+    // Отложенная структурная пересборка: если фильтры менялись во время зума
+    // (rebuildFromFilters отложил её), выполняем сразу по выходу из `zooming` —
+    // город догоняет актуальные фильтры без корёженья летящего уровня.
+    const offZoomFlush = appMode.subscribe((m) => {
+      if (m.kind !== "zooming" && structuralRebuildPending) {
+        structuralRebuildPending = false;
+        rebuildFromFilters();
+      }
+    });
+
     // Режим очистки: смена уровня В режиме (drill/крошки/поиск) обновляет группы
     // причин по новому поддереву. Вход в режим ловится этим же подписчиком.
     let lastCleanupPath: string | null = null;
@@ -911,6 +945,7 @@
       offHidden();
       offAgg();
       offGraphics();
+      offZoomFlush();
       offCleanupGroups();
       offMarks();
       if (aggTimer) clearTimeout(aggTimer);
@@ -922,6 +957,9 @@
 
   /** Выбрать папку → реальный скан со стримом прогресса → верхний уровень. */
   async function scanFolder() {
+    // Гард от повторного запуска (Ctrl+O/кнопка во время идущего скана): бэк
+    // параллельный скан тоже отклонит, но не даём даже открыть диалог.
+    if (appMode.get().kind === "scanning") return;
     const root = await open({ directory: true, multiple: false });
     if (typeof root !== "string") return; // отмена диалога
 
@@ -982,13 +1020,25 @@
     // обводка остаётся в мире, пока меши уезжают под камеру, и «скачет» в сторону.
     interaction?.clearHover();
 
-    // Дети района (превью +1) — это содержимое нового активного уровня.
-    const childNodes = await getLevel(node.path, aggSpec(), PREVIEW_DEPTH);
-    currentUnfilteredNodes = childNodes;
-    const filtered = getFilteredNodes(childNodes);
-    await nav.drill(node, filtered, DRILL_MS);
-    setSummary(childNodes, node.path);
-    updateFilterEmpty(childNodes);
+    try {
+      // Дети района (превью +1) — это содержимое нового активного уровня.
+      const childNodes = await getLevel(node.path, aggSpec(), PREVIEW_DEPTH);
+      currentUnfilteredNodes = childNodes;
+      const filtered = getFilteredNodes(childNodes);
+      await nav.drill(node, filtered, DRILL_MS);
+      setSummary(childNodes, node.path);
+      updateFilterEmpty(childNodes);
+    } catch (err) {
+      // Режим НЕЛЬЗЯ оставить в `zooming`: он гардит всю навигацию — застрявший
+      // `zooming` означал бы мёртвые drill/крошки до перезапуска.
+      console.error("drill не удался:", err);
+      appMode.set(
+        wasCleanup
+          ? { kind: "cleanup", path: from }
+          : { kind: "idle", path: from },
+      );
+      return;
+    }
 
     breadcrumbs.set([
       ...$breadcrumbs,
@@ -1036,20 +1086,32 @@
     const parentNodesPromise = getLevel(crumb.path, aggSpec(), PREVIEW_DEPTH);
 
     let didSeamlessUp = false;
-    if (index === $breadcrumbs.length - 2 && nav.canUp(crumb.path)) {
-      const parentNodes = await parentNodesPromise;
-      currentUnfilteredNodes = parentNodes;
-      await nav.up(DRILL_MS);
-      didSeamlessUp = true;
-      setSummary(parentNodes, crumb.path);
-      updateFilterEmpty(parentNodes);
-    } else {
-      const parentNodes = await parentNodesPromise;
-      currentUnfilteredNodes = parentNodes;
-      const filtered = getFilteredNodes(parentNodes);
-      await nav.reset(filtered, crumb.path);
-      setSummary(parentNodes, crumb.path);
-      updateFilterEmpty(parentNodes);
+    try {
+      if (index === $breadcrumbs.length - 2 && nav.canUp(crumb.path)) {
+        const parentNodes = await parentNodesPromise;
+        currentUnfilteredNodes = parentNodes;
+        await nav.up(DRILL_MS);
+        didSeamlessUp = true;
+        setSummary(parentNodes, crumb.path);
+        updateFilterEmpty(parentNodes);
+      } else {
+        const parentNodes = await parentNodesPromise;
+        currentUnfilteredNodes = parentNodes;
+        const filtered = getFilteredNodes(parentNodes);
+        await nav.reset(filtered, crumb.path);
+        setSummary(parentNodes, crumb.path);
+        updateFilterEmpty(parentNodes);
+      }
+    } catch (err) {
+      // Не оставляем режим в `zooming` (иначе навигация мертва до перезапуска).
+      console.error("переход по крошке не удался:", err);
+      const stay = $breadcrumbs[$breadcrumbs.length - 1].path;
+      appMode.set(
+        wasCleanup
+          ? { kind: "cleanup", path: stay }
+          : { kind: "idle", path: stay },
+      );
+      return;
     }
     breadcrumbs.set($breadcrumbs.slice(0, index + 1));
     appMode.set(
@@ -1226,12 +1288,25 @@
     hoveredNode.set(null);
     appMode.set({ kind: "zooming", from: "", to: parentPath });
 
-    const nodes = await getLevel(parentPath, aggSpec(), PREVIEW_DEPTH);
-    currentUnfilteredNodes = nodes;
-    nav.reset(getFilteredNodes(nodes), parentPath);
-    interaction?.clearHover();
-    setSummary(nodes, parentPath);
-    updateFilterEmpty(nodes);
+    try {
+      const nodes = await getLevel(parentPath, aggSpec(), PREVIEW_DEPTH);
+      currentUnfilteredNodes = nodes;
+      nav.reset(getFilteredNodes(nodes), parentPath);
+      interaction?.clearHover();
+      setSummary(nodes, parentPath);
+      updateFilterEmpty(nodes);
+    } catch (err) {
+      // Не оставляем режим в `zooming` (иначе навигация мертва до перезапуска).
+      console.error("навигация к результату не удалась:", err);
+      const stay =
+        crumbsNow.length > 0 ? crumbsNow[crumbsNow.length - 1].path : "";
+      appMode.set(
+        wasCleanup
+          ? { kind: "cleanup", path: stay }
+          : { kind: "idle", path: stay },
+      );
+      return;
+    }
     breadcrumbs.set(levelChain);
     appMode.set(
       wasCleanup
@@ -1292,6 +1367,7 @@
           onClose={closeCard}
           onHide={hideSelected}
           onCopyPath={copyPathAction}
+          showCleanup={$appMode.kind === "cleanup"}
         />
       {/key}
     </div>
@@ -1308,6 +1384,7 @@
         expanded={false}
         onReveal={revealNode}
         onClose={closeCard}
+        showCleanup={$appMode.kind === "cleanup"}
       />
     </div>
   {/if}

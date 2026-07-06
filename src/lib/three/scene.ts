@@ -263,8 +263,10 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
   controls.dampingFactor = 0.08;
   controls.minPolarAngle = 0.35; // ~20° от вертикали
   controls.maxPolarAngle = 1.35; // ~77°, чуть выше горизонта
-  controls.minDistance = 30;
-  controls.maxDistance = 1200;
+  // Границы зума СУЖЕНЫ ×2 (было 30/1200): не подлетать вплотную к зданиям и не
+  // отъезжать так далеко, что город вырождается в пятно. LOD от границ не зависит.
+  controls.minDistance = 60;
+  controls.maxDistance = 600;
   controls.target.copy(INITIAL_TARGET);
   controls.update();
 
@@ -495,6 +497,16 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
     return new Promise((resolve) => {
       // На время перелёта глушим пользовательский ввод, чтобы не драться с твином.
       controls.enabled = false;
+      // Клампы дистанции — только для пользовательского зума: покадровый
+      // controls.update() клампит безусловно, и при drill в мелкий район
+      // (конечная дистанция 228·s < minDistance) он ломал бы траекторию твина
+      // (камера упирается в минимум, а на свопе — скачок). Снимаем на время
+      // перелёта; onArrive ставит камеру в каноническую позу (дистанция в
+      // границах), после чего возвращаем.
+      const savedMin = controls.minDistance;
+      const savedMax = controls.maxDistance;
+      controls.minDistance = 0;
+      controls.maxDistance = Infinity;
       const camFrom = camera.position.clone();
       const tgtFrom = controls.target.clone();
       const t = { p: 0 };
@@ -513,6 +525,8 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
           // rebase идёт ДО повторного включения контролов и резолва, в этом же
           // кадре — следующий render уже нормированный (origin shift невидим).
           onArrive?.();
+          controls.minDistance = savedMin;
+          controls.maxDistance = savedMax;
           controls.enabled = true;
           resolve();
         })

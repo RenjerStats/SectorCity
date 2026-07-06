@@ -11,7 +11,14 @@
  * ручку, чей `flyTo` вызывает `onArrive` синхронно (как реальный — в кадре прилёта).
  */
 import { describe, expect, it } from "vitest";
-import { Group, PerspectiveCamera, Vector3, type Object3D } from "three";
+import {
+  Group,
+  PerspectiveCamera,
+  Raycaster,
+  Vector3,
+  type InstancedMesh,
+  type Object3D,
+} from "three";
 import type { SceneHandle } from "./scene";
 import {
   activeView,
@@ -349,6 +356,306 @@ describe("createNavigator: reset / drill / up", () => {
     expect(view).not.toBeNull();
     expect(view!.pickMeshes().length).toBeGreaterThan(0);
 
+    nav.dispose();
+  });
+});
+
+describe("createNavigator: циклы drill→up не ломают пикинг (регрессия)", () => {
+  /** Все живые уровни в контенте: группы с userData.view. */
+  function liveViews(content: Group) {
+    const views: { group: Object3D; meshes: Set<Object3D> }[] = [];
+    content.traverse((obj) => {
+      const v = (obj as Group).userData?.view;
+      if (v) {
+        views.push({
+          group: obj,
+          meshes: new Set(v.allVisualMeshes()),
+        });
+      }
+    });
+    return views;
+  }
+
+  /** Инвариант пула: ни один меш не принадлежит двум живым уровням сразу,
+   *  и каждый меш уровня — потомок ИМЕННО его группы (не украден другим). */
+  function expectNoMeshSharing(content: Group) {
+    const views = liveViews(content);
+    const owner = new Map<Object3D, Object3D>();
+    for (const v of views) {
+      for (const m of v.meshes) {
+        expect(owner.has(m)).toBe(false); // меш не делится между уровнями
+        owner.set(m, v.group);
+        // Родительская цепочка меша ведёт в группу его уровня.
+        let p: Object3D | null = m.parent;
+        let insideOwn = false;
+        while (p) {
+          if (p === v.group) {
+            insideOwn = true;
+            break;
+          }
+          p = p.parent;
+        }
+        expect(insideOwn).toBe(true);
+      }
+    }
+  }
+
+  /** Меши активного вида принадлежат группе ИМЕННО активного уровня: группа-
+   *  владелец каждого pick-меша несёт этот же view И находится в контенте. */
+  function expectActiveOwnsItsMeshes(content: Group) {
+    const view = activeView(content);
+    expect(view).not.toBeNull();
+    for (const m of view!.pickMeshes()) {
+      // Ближайшая группа-уровень над мешом.
+      let p: Object3D | null = m.parent;
+      while (p && !(p as Group).userData?.view) p = p.parent;
+      expect(p).not.toBeNull();
+      expect((p as Group).userData.view).toBe(view);
+      // И она смонтирована в контент (уровень реально на сцене).
+      let anc: Object3D | null = p;
+      while (anc && anc !== content) anc = anc.parent;
+      expect(anc).toBe(content);
+    }
+  }
+
+  /** Реплика interaction.raycastHit: вертикальный луч вниз в точку (x, z) по
+   *  pick-мешам АКТИВНОГО вида; вложенные превью пропускаются (isPickTarget). */
+  function castDown(content: Group, x: number, z: number) {
+    content.updateMatrixWorld(true);
+    const view = activeView(content)!;
+    const ray = new Raycaster(new Vector3(x, 500, z), new Vector3(0, -1, 0));
+    const hits = ray.intersectObjects(view.pickMeshes(), false);
+    for (const h of hits) {
+      if (h.instanceId == null) continue;
+      const mesh = h.object as InstancedMesh;
+      if (!view.isPickTarget(mesh, h.instanceId)) continue;
+      return view.resolvePick(mesh, h.instanceId)?.node ?? null;
+    }
+    return null;
+  }
+
+  /** Индекс инстанса района `path` в меше куполов активного вида. */
+  function domeIndexOf(view: ViewLike2, dome: InstancedMesh, path: string) {
+    for (let j = 0; j < dome.count; j++) {
+      const info = view.resolvePick(dome, j);
+      if (info?.node.path === path) return j;
+    }
+    return -1;
+  }
+  type ViewLike2 = ReturnType<typeof activeView> & object;
+
+  it("повторные drill→up в один район: купол восстановлен, застройка на месте", async () => {
+    const handle = fakeHandle();
+    const nav = createNavigator(handle);
+    const t = tree();
+    nav.reset(t, "root");
+    const buildings0 = sumVisible(
+      pickRoles(activeView(handle.content)!).buildings,
+    );
+
+    for (let i = 0; i < 3; i++) {
+      const nodeA = t[0];
+      await nav.drill(nodeA, nodeA.children!, 0);
+      expectNoMeshSharing(handle.content);
+      await nav.up(0);
+      expectNoMeshSharing(handle.content);
+
+      const view = activeView(handle.content)!;
+      // Симптом «наведение сквозь купол»: купол /a обязан быть восстановлен
+      // после подъёма (не вырожден ZERO), иначе луч проваливается внутрь.
+      const roles = pickRoles(view);
+      const jA = domeIndexOf(view, roles.dome, "/a");
+      expect(jA).toBeGreaterThanOrEqual(0);
+      expect(isHidden(matrixAt(roles.dome, jA))).toBe(false);
+      // Симптом «домики перестали быть интерактивными»: видимая застройка 1:1.
+      expect(sumVisible(roles.buildings)).toBe(buildings0);
+    }
+    nav.dispose();
+  });
+
+  it("РЕГРЕССИЯ: rebuildActive В ПОЛЁТЕ твина — no-op (без двойного dispose)", async () => {
+    // Фейк с РУЧНЫМ прилётом: onArrive не зовётся, пока тест сам не «долетит».
+    const content = new Group();
+    const camera = new PerspectiveCamera();
+    let arrive: (() => void) | undefined;
+    let resolveFly: (() => void) | undefined;
+    const handle = {
+      content,
+      camera,
+      add(_o: Object3D) {},
+      onFrame: () => () => {},
+      flyTo(
+        position: Vector3,
+        _target: Vector3,
+        _ms: number,
+        onArrive?: () => void,
+      ) {
+        camera.position.copy(position);
+        arrive = onArrive;
+        return new Promise<void>((res) => (resolveFly = res));
+      },
+      placeCamera(position: Vector3) {
+        camera.position.copy(position);
+      },
+      dispose() {},
+    } as unknown as SceneHandle;
+
+    const nav = createNavigator(handle);
+    const t = tree();
+    nav.reset(t, "root");
+    const buildings0 = sumVisible(
+      pickRoles(activeView(handle.content)!).buildings,
+    );
+
+    const nodeA = t[0];
+    const drillP = nav.drill(nodeA, nodeA.children!, 0); // твин «завис» в полёте
+
+    // Пересборка активного уровня посреди твина: раньше disposed'ила уровень,
+    // обещанный свопу (двойной возврат мешей в пул → два уровня делят меш).
+    nav.rebuildActive(t); // должен быть no-op (interactive=false в полёте)
+
+    arrive?.(); // «долетели»: своп декора/активного
+    resolveFly?.();
+    await drillP;
+
+    expectNoMeshSharing(handle.content);
+    expectActiveOwnsItsMeshes(handle.content);
+    expect(nav.inspect().activePath).toBe("/a");
+    expect(nav.inspect().decor.map((d) => d.path)).toEqual(["root"]);
+
+    // Подъём обратно: root снова активен, застройка 1:1, меши не делятся.
+    const upP = nav.up(0);
+    arrive?.();
+    resolveFly?.();
+    await upP;
+    expectNoMeshSharing(handle.content);
+    // Ключевой инвариант регрессии: без гарда пересборка-в-полёте оставляла в
+    // навигаторе «зомби»-уровень, чьи меши физически принадлежат группе ДРУГОГО
+    // уровня (пул выдал их дважды) → пикинг резолвился чужими таблицами.
+    expectActiveOwnsItsMeshes(handle.content);
+    const view = activeView(handle.content)!;
+    expect(sumVisible(pickRoles(view).buildings)).toBe(buildings0);
+
+    nav.dispose();
+  });
+
+  it("РЕГРЕССИЯ: маршрут через «Мелочь» (::<other>) и up обратно — пикинг цел", async () => {
+    // Ровно пользовательский сценарий: Media → AnakinGame → Мелочь → Hair →
+    // Textures, затем up до AnakinGame. Раньше на этом уровне ломался raycast
+    // (луч проходил сквозь купола, включая не посещённый Robe).
+    const agg = (path: string, children: ReturnType<typeof file>[]) => {
+      const size = children.reduce((s, c) => s + c.size, 0);
+      return {
+        ...file(path, size),
+        name: "Мелочь",
+        flags: ["aggregated" as const],
+        childCount: children.length,
+        categoryMask: children.reduce((m, c) => m | c.categoryMask, 0),
+        children,
+      };
+    };
+    const textures = dir("/M/AG/Hair/Textures", [
+      file("/M/AG/Hair/Textures/t1", 50, "image"),
+      file("/M/AG/Hair/Textures/t2", 30, "image"),
+    ]);
+    const hair = dir("/M/AG/Hair", [textures, file("/M/AG/Hair/h1", 20)]);
+    const robe = dir("/M/AG/Robe", [file("/M/AG/Robe/r1", 40, "document")]);
+    const other = agg("/M/AG::<other>", [
+      hair as unknown as ReturnType<typeof file>,
+      file("/M/AG/loose", 10),
+    ]);
+    const ag = dir("/M/AG", [
+      robe,
+      other as unknown as ReturnType<typeof file>,
+      file("/M/AG/big.bin", 500, "video"),
+    ]);
+    const t = [ag, file("/M/x.bin", 100, "binary")];
+
+    const handle = fakeHandle();
+    const nav = createNavigator(handle);
+    nav.reset(t, "/M");
+
+    await nav.drill(ag, ag.children!, 0);
+    const agBuildings = sumVisible(
+      pickRoles(activeView(handle.content)!).buildings,
+    );
+    await nav.drill(other, other.children!, 0);
+    await nav.drill(hair, hair.children!, 0);
+    await nav.drill(textures, textures.children!, 0);
+
+    // Подъём обратно до AnakinGame: Textures → Hair → Мелочь → AnakinGame.
+    await nav.up(0);
+    await nav.up(0);
+    await nav.up(0);
+
+    expect(nav.inspect().activePath).toBe("/M/AG");
+    expectNoMeshSharing(handle.content);
+    expectActiveOwnsItsMeshes(handle.content);
+
+    const view = activeView(handle.content)!;
+    const roles = pickRoles(view);
+    // Купола районов AnakinGame (Robe и «Мелочь») восстановлены — луч упирается
+    // в купол, а не проходит внутрь. Проверяем НАСТОЯЩИМ Raycaster'ом (как
+    // interaction.raycastHit): вертикальный луч в центр купола обязан разрешиться
+    // в сам район, а не в содержимое под стеклом и не в пустоту.
+    for (const p of ["/M/AG/Robe", "/M/AG::<other>"]) {
+      const j = domeIndexOf(view, roles.dome, p);
+      expect(j).toBeGreaterThanOrEqual(0);
+      const m = matrixAt(roles.dome, j);
+      expect(isHidden(m)).toBe(false);
+      expect(view.isPickTarget(roles.dome, j)).toBe(true);
+      const hitNode = castDown(handle.content, m.elements[12], m.elements[14]);
+      expect(hitNode?.path).toBe(p);
+    }
+    // Видимая застройка уровня 1:1 с первым заходом.
+    expect(sumVisible(roles.buildings)).toBe(agBuildings);
+
+    nav.dispose();
+  });
+
+  it("зигзаг по районам и глубокий спуск: пикинг и купола целы", async () => {
+    const handle = fakeHandle();
+    const nav = createNavigator(handle);
+    const t = tree();
+    nav.reset(t, "root");
+    const buildings0 = sumVisible(
+      pickRoles(activeView(handle.content)!).buildings,
+    );
+
+    const nodeA = t[0];
+    const nodeB = t[1];
+    // /a → up → /b → up → /a → /a/x → up → up (агрессивная навигация).
+    await nav.drill(nodeA, nodeA.children!, 0);
+    await nav.up(0);
+    await nav.drill(nodeB, nodeB.children!, 0);
+    await nav.up(0);
+    await nav.drill(nodeA, nodeA.children!, 0);
+    const nodeAX = nodeA.children![0];
+    await nav.drill(nodeAX, nodeAX.children!, 0);
+    expectNoMeshSharing(handle.content);
+    await nav.up(0);
+    expectNoMeshSharing(handle.content);
+    await nav.up(0);
+    expectNoMeshSharing(handle.content);
+
+    expect(nav.inspect().activePath).toBe("root");
+    const view = activeView(handle.content)!;
+    const roles = pickRoles(view);
+    // Оба купола (+1 районы /a и /b) восстановлены.
+    for (const p of ["/a", "/b"]) {
+      const j = domeIndexOf(view, roles.dome, p);
+      expect(j).toBeGreaterThanOrEqual(0);
+      expect(isHidden(matrixAt(roles.dome, j))).toBe(false);
+    }
+    expect(sumVisible(roles.buildings)).toBe(buildings0);
+    // Каждый pick-меш резолвится в узлы ИМЕННО этого уровня.
+    for (const m of view.pickMeshes()) {
+      for (let i = 0; i < m.count; i++) {
+        const info = view.resolvePick(m, i);
+        if (info)
+          expect(["/a", "/b", "/c"]).toContain(info.node.path.slice(0, 2));
+      }
+    }
     nav.dispose();
   });
 });

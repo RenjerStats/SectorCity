@@ -308,6 +308,13 @@ export function createNavigator(handle: SceneHandle): CityNavigator {
 
   function rebuildActive(nodes: ScanNode[]): void {
     if (!active) return;
+    // Гард от пересборки В ПОЛЁТЕ твина (drill/up): в этот момент `active` уже
+    // обещан свопу — onArrive превратит его в декор (drill) или утилизирует (up).
+    // Dispose здесь дал бы ДВОЙНОЙ возврат его мешей в пул → пул выдал бы один
+    // InstancedMesh двум живым уровням → «кража» меша группой второго уровня и
+    // рассинхрон пикинга (мёртвые здания, наведение сквозь купол). Владелец
+    // (Scene) откладывает пересборку до конца зума и повторяет её сам.
+    if (content.userData.interactive !== true) return;
     const { path, span } = active;
     // Активный уровень всегда в identity (origin shift), поэтому пересборка с тем
     // же span сохраняет геометрию под камерой; декор-родитель остаётся как есть

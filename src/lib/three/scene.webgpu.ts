@@ -153,8 +153,9 @@ export async function createSceneWebGPU(
   controls.dampingFactor = 0.08;
   controls.minPolarAngle = 0.35;
   controls.maxPolarAngle = 1.35;
-  controls.minDistance = 30;
-  controls.maxDistance = 1200;
+  // Границы зума сужены ×2 (зеркало scene.ts): 60/600.
+  controls.minDistance = 60;
+  controls.maxDistance = 600;
   controls.target.copy(INITIAL_TARGET);
   controls.update();
 
@@ -491,6 +492,13 @@ export async function createSceneWebGPU(
   ): Promise<void> {
     return new Promise((resolve) => {
       controls.enabled = false;
+      // Клампы дистанции снимаем на время твина (зеркало scene.ts): покадровый
+      // controls.update() клампит безусловно и ломал бы траекторию drill в
+      // мелкий район (конечная дистанция < minDistance).
+      const savedMin = controls.minDistance;
+      const savedMax = controls.maxDistance;
+      controls.minDistance = 0;
+      controls.maxDistance = Infinity;
       const camFrom = camera.position.clone();
       const tgtFrom = controls.target.clone();
       const t = { p: 0 };
@@ -504,6 +512,8 @@ export async function createSceneWebGPU(
         })
         .onComplete(() => {
           onArrive?.();
+          controls.minDistance = savedMin;
+          controls.maxDistance = savedMax;
           controls.enabled = true;
           resolve();
         })
