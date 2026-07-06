@@ -978,13 +978,15 @@
         : "";
     appMode.set({ kind: "zooming", from, to: node.path });
     hoveredNode.set(null);
+    // Гасим обводку/лазер на ВЕСЬ твин: иначе замороженная (matrixAutoUpdate=false)
+    // обводка остаётся в мире, пока меши уезжают под камеру, и «скачет» в сторону.
+    interaction?.clearHover();
 
     // Дети района (превью +1) — это содержимое нового активного уровня.
     const childNodes = await getLevel(node.path, aggSpec(), PREVIEW_DEPTH);
     currentUnfilteredNodes = childNodes;
     const filtered = getFilteredNodes(childNodes);
     await nav.drill(node, filtered, DRILL_MS);
-    interaction?.clearHover();
     setSummary(childNodes, node.path);
     updateFilterEmpty(childNodes);
 
@@ -997,6 +999,10 @@
         ? { kind: "cleanup", path: node.path }
         : { kind: "idle", path: node.path },
     );
+    // Уровень стал интерактивным — пересчитать наведение по текущей позиции мыши
+    // (без движения указателя `dirty` остаётся false). Восстанавливает hovered-узел
+    // и курсор-лазер на том же месте экрана → работает автоdrill зажатым Enter.
+    interaction?.refreshHover();
   }
 
   /** §6: после бесшовного `up` дочитать ОДИН дальний декор-слой, если буфер контекста
@@ -1025,6 +1031,7 @@
     appMode.set({ kind: "zooming", from: "", to: crumb.path });
     hoveredNode.set(null);
     interaction?.clearSelection(); // выбор уровня-источника больше не валиден
+    interaction?.clearHover(); // гасим обводку/лазер на весь твин (см. drill)
 
     const parentNodesPromise = getLevel(crumb.path, aggSpec(), PREVIEW_DEPTH);
 
@@ -1044,14 +1051,14 @@
       setSummary(parentNodes, crumb.path);
       updateFilterEmpty(parentNodes);
     }
-    interaction?.clearHover();
-
     breadcrumbs.set($breadcrumbs.slice(0, index + 1));
     appMode.set(
       wasCleanup
         ? { kind: "cleanup", path: crumb.path }
         : { kind: "idle", path: crumb.path },
     );
+    // Пересчитать наведение по текущей позиции мыши (восстановить hovered + лазер).
+    interaction?.refreshHover();
     // Бесшовный подъём мог оголить дальний контекст — дочитать его (§6), не блокируя.
     if (didSeamlessUp) void replenishFarDecor();
   }

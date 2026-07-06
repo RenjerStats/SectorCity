@@ -71,6 +71,15 @@ export interface InteractionController {
   selectionAnchor(): Vector3 | null;
   /** Сбросить наведение (напр. после смены уровня). */
   clearHover(): void;
+  /**
+   * Заставить пересчитать наведение по ТЕКУЩЕЙ позиции указателя на следующем
+   * кадре (как будто указатель дёрнулся). Нужно после drill/смены уровня: без
+   * движения мыши `dirty` остаётся false, и наведение (а с ним и hovered-узел, и
+   * курсор-лазер в experimental) не восстанавливается на том же месте экрана —
+   * из-за чего, в частности, ломался автоdrill зажатым Enter. No-op, если
+   * указатель вне канвы.
+   */
+  refreshHover(): void;
   /** Снять выбор (напр. при drill/смене уровня). Шлёт `onSelect(null)`. */
   clearSelection(): void;
   /**
@@ -458,6 +467,11 @@ export function setupInteraction(
       highlight.visible = false;
       cb.onHover(null);
       cursorLight.intensity = 0;
+    },
+    refreshHover() {
+      // Только пометка «пересчитать» — сам raycast/курсор-свет отработают в
+      // onFrame по текущему `pointer` (обновляется на каждом pointermove).
+      if (pointerInside) dirty = true;
     },
     clearSelection() {
       setSelected(null);
