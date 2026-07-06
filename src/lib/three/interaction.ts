@@ -254,14 +254,18 @@ export function setupInteraction(
 
       if (h.object.type === "InstancedMesh") {
         const mesh = h.object as InstancedMesh;
-        if (h.instanceId == null || !meshView.isPickTarget(mesh, h.instanceId)) continue;
+        if (h.instanceId == null || !meshView.isPickTarget(mesh, h.instanceId))
+          continue;
       }
 
       if (h.face) {
         const normal = h.face.normal.clone();
         if (h.object.type === "InstancedMesh") {
           const instanceMatrix = new Matrix4();
-          (h.object as InstancedMesh).getMatrixAt(h.instanceId!, instanceMatrix);
+          (h.object as InstancedMesh).getMatrixAt(
+            h.instanceId!,
+            instanceMatrix,
+          );
           normal.transformDirection(instanceMatrix);
         } else {
           normal.transformDirection(h.object.matrixWorld);
@@ -279,7 +283,9 @@ export function setupInteraction(
     const target = quality.level === "experimental" ? getCursorTarget() : null;
     if (target) {
       const offset = 3.5;
-      cursorLight.position.copy(target.point).addScaledVector(target.normal, offset);
+      cursorLight.position
+        .copy(target.point)
+        .addScaledVector(target.normal, offset);
       cursorLight.intensity = 120;
 
       // Обновляем разделяемые юниформы

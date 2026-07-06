@@ -171,7 +171,7 @@ export const QUALITY: Record<GraphicsLevel, QualityConfig> = {
   // (glassExtras:false), а node-конвейер TSL (pass → SSGI → TRAA → bloom)
   // возвращён. VSM-тени выключены — на WebGPU надёжнее PCF; контраст добран
   // светом (низкий ambient + яркое солнце, см. scene.webgpu.ts). Бонус бэкенда:
-  // полуотражающий пол (reflector в makeFadedGround, city.ts).
+  // полуотражающий пол (reflector в buildCanonicalGround, city.ts).
   experimental: {
     backend: "webgpu",
     pixelRatioCap: 2,

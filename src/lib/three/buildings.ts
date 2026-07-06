@@ -462,18 +462,9 @@ function getCategoryMaterials(category: Category): Material[] {
         steel(),
       ];
     case "archive":
-      return [
-        plastic(BODY_TINT.archive),
-        crownMat("archive"),
-        steel(),
-      ];
+      return [plastic(BODY_TINT.archive), crownMat("archive"), steel()];
     case "binary":
-      return [
-        plastic(BODY_TINT.binary),
-        crownMat("binary"),
-        steel(),
-        glass(),
-      ];
+      return [plastic(BODY_TINT.binary), crownMat("binary"), steel(), glass()];
   }
 }
 
@@ -483,42 +474,81 @@ interface CachedDef {
 }
 
 const geometryCache: Partial<Record<Category, CachedDef>> = {};
+
+/**
+ * Пул наборов материалов по категориям (WebGPU-критично): каждый НОВЫЙ материал —
+ * это новый прогон node-builder'а и потенциальная компиляция пайплайна
+ * (WGSL→HLSL→FXC на Windows — сотни мс на тяжёлый шейдер), а `dispose` материала
+ * уровня рушит refcount пайплайна и выкидывает его из кэша рендера — следующая
+ * встреча категории компилирует шейдер заново (статтер 1–2 с на drill/up).
+ * Поэтому уровни НЕ создают/уничтожают материалы, а берут набор из пула
+ * (`makeBuildingDef`) и возвращают его (`releaseBuildingMaterials`) при своём
+ * dispose. Пул живёт, пока не сменился quality-ключ.
+ *
+ * Делить один набор между живыми уровнями нельзя: decor-фейд (`dimBuilding`)
+ * мутирует `material.color` per-уровень — поэтому именно пул, а не общий кэш.
+ */
+const materialPool: Partial<Record<Category, Material[][]>> = {};
 let cachedQualityKey = "";
 
 function getQualityKey(): string {
   return `${quality.active.backend}_${quality.active.pbr}_${quality.active.roundSegments}`;
 }
 
+/** Сбросить кэш геометрий и пул материалов при смене quality-ключа. */
+function ensureQualityCaches(): void {
+  const currentKey = getQualityKey();
+  if (currentKey === cachedQualityKey) return;
+  for (const cat of Object.keys(geometryCache) as Category[]) {
+    geometryCache[cat]?.geometry.dispose();
+    delete geometryCache[cat];
+  }
+  for (const cat of Object.keys(materialPool) as Category[]) {
+    for (const set of materialPool[cat] ?? []) for (const m of set) m.dispose();
+    delete materialPool[cat];
+  }
+  cachedQualityKey = currentKey;
+}
+
 /**
- * Построить уникальный `BuildingDef` для категории. Владелец (`city.ts`) кладёт
- * геометрию+материалы в `InstancedMesh` и обязан вызвать `dispose` геометрии и
- * каждого материала на смене уровня (tech §5.5; `disposeGroup` уже умеет массив).
+ * Вернуть набор материалов категории в пул (зеркало `makeBuildingDef`). Зовётся
+ * `disposeGroup` (city.ts) через `userData.disposeExtra` меша зданий. Наборы,
+ * созданные под другой quality-ключ (смена уровня графики при живых уровнях),
+ * в пул не попадают — утилизируются.
+ */
+export function releaseBuildingMaterials(
+  category: Category,
+  materials: Material[],
+): void {
+  const stale = materials.some(
+    (m) => (m as { poolKey?: string }).poolKey !== getQualityKey(),
+  );
+  if (stale) {
+    for (const m of materials) m.dispose();
+    return;
+  }
+  (materialPool[category] ??= []).push(materials);
+}
+
+/**
+ * Построить уникальный `BuildingDef` для категории. Геометрия — из кэша (общая для
+ * всех уровней), материалы — из пула (см. `materialPool`). Владелец (`city.ts`)
+ * кладёт их в `InstancedMesh` и на dispose уровня ВОЗВРАЩАЕТ набор через
+ * `releaseBuildingMaterials` (материалы помечены `isCached` — `disposeGroup` их
+ * не уничтожает).
  */
 export function makeBuildingDef(category: Category): BuildingDef {
-  const currentKey = getQualityKey();
-  if (currentKey !== cachedQualityKey) {
-    // При смене качества очищаем кэш геометрий
-    for (const cat of Object.keys(geometryCache) as Category[]) {
-      const entry = geometryCache[cat];
-      if (entry) {
-        entry.geometry.dispose();
-      }
-    }
-    for (const key of Object.keys(geometryCache)) {
-      delete geometryCache[key as Category];
-    }
-    cachedQualityKey = currentKey;
-  }
+  ensureQualityCaches();
 
   let entry = geometryCache[category];
   if (!entry) {
     const rawDef = BUILDERS[category]();
     // Материалы из тестового запуска не нужны — удаляем
     rawDef.materials.forEach((m) => m.dispose());
-    
+
     // Помечаем геометрию как кэшированную, чтобы disposeGroup её не уничтожил
     (rawDef.geometry as any).isCached = true;
-    
+
     entry = {
       geometry: rawDef.geometry,
       designedColors: rawDef.designedColors,
@@ -526,12 +556,27 @@ export function makeBuildingDef(category: Category): BuildingDef {
     geometryCache[category] = entry;
   }
 
-  // Создаем свежие копии материалов для этого уровня
-  const materials = getCategoryMaterials(category);
+  const designed = entry.designedColors;
+  let materials = materialPool[category]?.pop();
+  if (materials) {
+    // Возвращённый набор мог остаться затемнённым decor-фейдом — вернуть эталон.
+    materials.forEach((m, i) =>
+      (m as MeshStandardMaterial).color.copy(designed[i]),
+    );
+  } else {
+    materials = getCategoryMaterials(category);
+    materials.forEach((m, i) => {
+      (m as any).isCached = true; // не dispose'ить в disposeGroup — набор пуловый
+      (m as { poolKey?: string }).poolKey = getQualityKey();
+      // Имя попадает в ProgrammableStage рендера — perf-диагностика статтера
+      // (scene.webgpu.ts) называет виновника компиляции по нему.
+      m.name = `bld-${category}-${i}`;
+    });
+  }
 
   return {
     geometry: entry.geometry,
     materials,
-    designedColors: entry.designedColors,
+    designedColors: designed,
   };
 }

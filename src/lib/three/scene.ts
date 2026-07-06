@@ -42,7 +42,12 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { Easing, Group as TweenGroup, Tween } from "@tweenjs/tween.js";
 import { INITIAL_CAMERA_POS, INITIAL_TARGET } from "./home";
 import { quality } from "./quality";
-import { makeBuildingDef } from "./buildings";
+import {
+  makeBuildingDef,
+  releaseBuildingMaterials,
+  type BuildingDef,
+} from "./buildings";
+import type { Category } from "../ipc/contract";
 
 /** Ручка управления сценой для владельца (Svelte-компонента) и слоёв. */
 export interface SceneHandle {
@@ -583,7 +588,14 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
 
       const meshFlight = new Mesh(testGeo, createTestMat(true));
       const instMeshFlight = new InstancedMesh(testGeo, createTestMat(true), 1);
-      const instMeshStatic = new InstancedMesh(testGeo, createTestMat(false), 1);
+      const instMeshStatic = new InstancedMesh(
+        testGeo,
+        createTestMat(false),
+        1,
+      );
+      // У боевых куполов уровня есть instanceColor (тинт GLASS_COLOR) — его
+      // наличие меняет программу (USE_INSTANCING_COLOR): греем ЦВЕТНОЙ вариант.
+      instMeshStatic.setColorAt(0, new Color(0xffffff));
 
       scene.add(meshFlight);
       scene.add(instMeshFlight);
@@ -603,11 +615,19 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
         "binary",
       ] as const;
 
+      // Наборы материалов — из пула buildings.ts: после прогрева ВОЗВРАЩАЕМ их
+      // (не dispose — иначе программы категорий выкидываются из кэша рендера,
+      // а пул не наполняется).
+      const warmDefs: { cat: Category; def: BuildingDef }[] = [];
       for (const cat of CATEGORIES) {
         const def = makeBuildingDef(cat);
         const instMesh = new InstancedMesh(def.geometry, def.materials, 1);
+        // Боевые меши категорий несут instanceColor с рождения — греем тот же
+        // (цветной) вариант программ, иначе первый уровень компилировал бы заново.
+        instMesh.setColorAt(0, new Color(0xffffff));
         scene.add(instMesh);
         buildingMeshes.push(instMesh);
+        warmDefs.push({ cat, def });
       }
 
       try {
@@ -624,14 +644,9 @@ export function createScene(canvas: HTMLCanvasElement): SceneHandle {
         instMeshStatic.material.dispose();
         testGeo.dispose();
 
-        for (const instMesh of buildingMeshes) {
-          scene.remove(instMesh);
-          if (Array.isArray(instMesh.material)) {
-            instMesh.material.forEach((m) => m.dispose());
-          } else {
-            instMesh.material.dispose();
-          }
-        }
+        for (const instMesh of buildingMeshes) scene.remove(instMesh);
+        for (const { cat, def } of warmDefs)
+          releaseBuildingMaterials(cat, def.materials);
       }
     },
     applyQuality() {

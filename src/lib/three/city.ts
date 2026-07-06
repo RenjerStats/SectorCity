@@ -42,6 +42,7 @@
  * Контакт с DOM — нет: это императивный 3D-слой. Уровнями владеет `navigator.ts`.
  */
 import {
+  type BufferGeometry,
   type Camera,
   CircleGeometry,
   Color,
@@ -64,7 +65,16 @@ import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeom
 // Node-ветка three — ТОЛЬКО для WebGPU-бэкенда (полуотражающий пол): статический
 // импорт не дороже, чем есть (Scene.svelte и так статически тянет scene.webgpu).
 import { MeshBasicNodeMaterial } from "three/webgpu";
-import { attribute, color as tslColor, float, reflector, positionWorld, vec3, normalView, uniform } from "three/tsl";
+import {
+  attribute,
+  color as tslColor,
+  float,
+  reflector,
+  positionWorld,
+  vec3,
+  normalView,
+  uniform,
+} from "three/tsl";
 import * as TSL from "three/tsl";
 import {
   cursorLightColor,
@@ -91,6 +101,41 @@ export const aggregatedFolderHalfD = uniform(0);
 
 /** Каноническая сторона уровня-владельца (мировые единицы): бо́льшая сторона. */
 export const CITY_SPAN = 200;
+
+/**
+ * Единая ёмкость инстанс-буфера для всех `InstancedMesh` — НАРОЧНО чуть выше
+ * лимита uniform-буфера. WebGPU-бэкенд three выбирает представление матриц по
+ * размеру (`InstanceNode._createInstanceMatrixNode`): при `N·64Б ≤ 65536`
+ * (N ≤ 1024; three запрашивает устройство с дефолтными лимитами, порог
+ * одинаков на всех машинах) — uniform-массив, чей безымянный буфер получает
+ * уникальное имя `NodeBuffer_<id>` в ТЕКСТЕ вершинного WGSL
+ * (`WGSLNodeBuilder.getBufferElement`). Программы/пайплайны рендер кэширует
+ * ПО ТЕКСТУ — уникальный id на каждый новый меш = новый текст = FXC-компиляция
+ * при КАЖДОМ drill (статтер ~1с), и прогрев `compile()` грел «не тот» текст.
+ * При `N ≥ 1025` матрицы уходят в interleaved-АТРИБУТЫ: имена стабильные,
+ * размер в текст не зашивается → текст шейдера не зависит от меша, пайплайн
+ * берётся из кэша, drill не компилирует ничего. Фактическое число рисуемых
+ * инстансов задаёт `mesh.count`; уровни крупнее ёмкости получают ёмкость,
+ * округлённую вверх до степени двойки (меньше уникальных ёмкостей → `meshPool`
+ * чаще находит меш «с запасом», а не создаёт новый под каждый чуть больший
+ * уровень), и остаются на том же атрибутном пути (текст тот же).
+ */
+export const INSTANCE_CAPACITY = 1025;
+
+/** `new InstancedMesh` с ёмкостью `INSTANCE_CAPACITY` (см. комментарий выше). */
+export function makeInstancedMesh(
+  geometry: BufferGeometry,
+  material: Material | Material[],
+  count: number,
+): InstancedMesh {
+  const capacity =
+    count <= INSTANCE_CAPACITY
+      ? INSTANCE_CAPACITY
+      : 2 ** Math.ceil(Math.log2(count));
+  const mesh = new InstancedMesh(geometry, material, capacity);
+  mesh.count = count;
+  return mesh;
+}
 /**
  * Зазоры наносятся КОСМЕТИЧЕСКИ — долей от размера прямоугольника, ПОСЛЕ squarify
  * (`applyCosmeticGaps`), а не через padding d3. Почему: squarify scale-инвариантен
@@ -167,6 +212,19 @@ const RING_RIM = 1.0;
 const DOME_AIR = 8; // запас над самым высоким домиком (зазор «застройка↔стекло»)
 const DOME_MIN_HEIGHT = 9; // минимальная высота купола (тощие папки читаемы)
 const DOME_FOOTPRINT_INSET = 0.8; // насколько footprint купола уже плиты района
+/**
+ * Зазор «край застройки ↔ стекло» (мировые ед.), который стекло обязано держать
+ * с ВНУТРЕННЕЙ стороны. Застройка отступает от края footprint района на ДОЛЮ
+ * (`CONTENT_MARGIN_FRAC`) — на большом/стандартном куполе это щедрый зазор, куда
+ * с запасом влезает `DOME_FOOTPRINT_INSET`. Но на «полоске»/крошечном кубике
+ * доля от малого размера схлопывается НИЖЕ инсета — застройка вылезает за стекло
+ * (протыкает буфер глубины, §II.3.7). Поэтому footprint стекла считаем ПО ОСЯМ
+ * адаптивно (`domeGlassInset`): у стандартных куполов инсет остаётся `0.8`
+ * (пиксель-в-пиксель), а у мелких/узких — уменьшается (стекло тянется наружу к
+ * краю плиты), чтобы накрыть застройку. Плита при этом НЕ меняется (её габарит
+ * по константному `DOME_FOOTPRINT_INSET`), поэтому соседние районы не слипаются.
+ */
+const DOME_GLASS_CLEARANCE = 0.4;
 /** Скруглённый стеклянный куб: радиус скругления на единичном боксе. Число
  *  сегментов скругления берём из активного уровня графики (`quality.active`). */
 const DOME_ROUND_RADIUS = 0.06;
@@ -692,6 +750,21 @@ function domeHeight(d: DistrictAcc): number {
   return Math.max(DOME_MIN_HEIGHT * s, d.maxTopY + DOME_AIR * s);
 }
 
+/**
+ * Адаптивный инсет стекла купола по ОДНОЙ оси (мировые ед.) для стороны района
+ * длиной `fullSide`. Застройка отступает от края footprint на `CONTENT_MARGIN_FRAC
+ * * fullSide`; стекло держим на `DOME_GLASS_CLEARANCE` внутрь от застройки, но не
+ * глубже стандартного `DOME_FOOTPRINT_INSET` и не мельче `0` (стекло не выходит за
+ * край footprint района → соседние купола не пересекаются). У стандартных куполов
+ * (широкая сторона) доля-зазор велика → инсет = `DOME_FOOTPRINT_INSET` без
+ * изменений; у мелких/узких — уменьшается, и стекло накрывает застройку. См.
+ * `DOME_GLASS_CLEARANCE`.
+ */
+function domeGlassInset(fullSide: number): number {
+  const margin = CONTENT_MARGIN_FRAC * fullSide;
+  return Math.max(0, Math.min(DOME_FOOTPRINT_INSET, margin - DOME_GLASS_CLEARANCE));
+}
+
 /** Высота из устаревания: чем старше mtime, тем выше (канал «устаревание»). */
 function heightFromMtime(mtime: number, nowSeconds: number): number {
   const age = Math.max(0, nowSeconds - mtime);
@@ -788,16 +861,25 @@ const GLASS_DISPERSION = 0.35;
  * достаточно вызывающим (`applyDomeProgress`, decor-dim, per-instance тинт).
  */
 // Кэш материалов стеклянных куполов для предотвращения рантайм-компиляции шейдеров при drill/up
-let cachedStaticMaterial: MeshPhysicalMaterial | MeshLambertMaterial | null = null;
-let cachedFlightMaterialSingle: MeshPhysicalMaterial | MeshLambertMaterial | null = null;
-let cachedFlightMaterialInstanced: MeshPhysicalMaterial | MeshLambertMaterial | null = null;
+let cachedStaticMaterial: MeshPhysicalMaterial | MeshLambertMaterial | null =
+  null;
+let cachedFlightMaterialSingle:
+  | MeshPhysicalMaterial
+  | MeshLambertMaterial
+  | null = null;
+let cachedFlightMaterialInstanced:
+  | MeshPhysicalMaterial
+  | MeshLambertMaterial
+  | null = null;
 let cachedQualityKey = "";
 
 function getQualityKey(): string {
   return `${quality.active.backend}_${quality.active.frostedGlass}_${quality.active.glassExtras}`;
 }
 
-function getCachedDomeMaterial(type: "static" | "flightSingle" | "flightInstanced"): MeshPhysicalMaterial | MeshLambertMaterial {
+export function getCachedDomeMaterial(
+  type: "static" | "flightSingle" | "flightInstanced",
+): MeshPhysicalMaterial | MeshLambertMaterial {
   const currentKey = getQualityKey();
   if (currentKey !== cachedQualityKey) {
     if (cachedStaticMaterial) {
@@ -822,18 +904,21 @@ function getCachedDomeMaterial(type: "static" | "flightSingle" | "flightInstance
     if (!cachedStaticMaterial) {
       cachedStaticMaterial = makeDomeMaterial(false);
       (cachedStaticMaterial as any).isCached = true;
+      cachedStaticMaterial.name = "dome-static";
     }
     return cachedStaticMaterial;
   } else if (type === "flightSingle") {
     if (!cachedFlightMaterialSingle) {
       cachedFlightMaterialSingle = makeDomeMaterial(true);
       (cachedFlightMaterialSingle as any).isCached = true;
+      cachedFlightMaterialSingle.name = "dome-flight-single";
     }
     return cachedFlightMaterialSingle;
   } else {
     if (!cachedFlightMaterialInstanced) {
       cachedFlightMaterialInstanced = makeDomeMaterial(true);
       (cachedFlightMaterialInstanced as any).isCached = true;
+      cachedFlightMaterialInstanced.name = "dome-flight-inst";
     }
     return cachedFlightMaterialInstanced;
   }
@@ -842,7 +927,7 @@ function getCachedDomeMaterial(type: "static" | "flightSingle" | "flightInstance
 let cachedDomeGeometry: RoundedBoxGeometry | null = null;
 let cachedDomeGeoQualityKey = "";
 
-function getCachedDomeGeometry(): RoundedBoxGeometry {
+export function getCachedDomeGeometry(): RoundedBoxGeometry {
   const currentKey = `${quality.active.roundSegments}`;
   if (currentKey !== cachedDomeGeoQualityKey) {
     if (cachedDomeGeometry) {
@@ -858,11 +943,18 @@ function getCachedDomeGeometry(): RoundedBoxGeometry {
   return cachedDomeGeometry;
 }
 
-let cachedBaseMetalMaterial: MeshPhysicalMaterial | MeshStandardMaterial | MeshLambertMaterial | null = null;
-let cachedBaseMatteMaterial: MeshStandardMaterial | MeshLambertMaterial | null = null;
+let cachedBaseMetalMaterial:
+  | MeshPhysicalMaterial
+  | MeshStandardMaterial
+  | MeshLambertMaterial
+  | null = null;
+let cachedBaseMatteMaterial: MeshStandardMaterial | MeshLambertMaterial | null =
+  null;
 let cachedBaseQualityKey = "";
 
-function getCachedBaseMaterial(metal: boolean): MeshStandardMaterial | MeshPhysicalMaterial | MeshLambertMaterial {
+export function getCachedBaseMaterial(
+  metal: boolean,
+): MeshStandardMaterial | MeshPhysicalMaterial | MeshLambertMaterial {
   const currentKey = `${quality.active.backend}_${quality.active.pbr}_${quality.active.glassExtras}`;
   if (currentKey !== cachedBaseQualityKey) {
     if (cachedBaseMetalMaterial) {
@@ -882,15 +974,400 @@ function getCachedBaseMaterial(metal: boolean): MeshStandardMaterial | MeshPhysi
     if (!cachedBaseMetalMaterial) {
       cachedBaseMetalMaterial = makeBaseMaterial(true);
       (cachedBaseMetalMaterial as any).isCached = true;
+      cachedBaseMetalMaterial.name = "base-metal";
     }
     return cachedBaseMetalMaterial;
   } else {
     if (!cachedBaseMatteMaterial) {
       cachedBaseMatteMaterial = makeBaseMaterial(false);
       (cachedBaseMatteMaterial as any).isCached = true;
+      cachedBaseMatteMaterial.name = "base-matte";
     }
     return cachedBaseMatteMaterial;
   }
+}
+
+function getBaseQualityKey(): string {
+  return `${quality.active.backend}_${quality.active.pbr}_${quality.active.glassExtras}`;
+}
+
+/**
+ * Пулы PER-LEVEL клонов статичного купола и плит-постаментов. Decor-фейд
+ * (`dimMesh`/`whiten` в buildLevel) мутирует `material.color` — ОБЩИЙ
+ * кэшированный материал так мутировать нельзя: серели купола/плиты ВСЕХ уровней
+ * разом, включая активный (материал-то один на всех). Клон делит node-граф
+ * (emissiveNode контура «мелочи» — по ссылке) и параметры с каноном → текст
+ * шейдера тот же, программа/пайплайн берутся из кэша рендера (без компиляции на
+ * drill/up), но `color` у каждого уровня свой. Возврат клона в пул — через
+ * `userData.disposeExtra` меша (см. buildLevel/disposeGroup).
+ */
+type LevelMaterialKind = "dome" | "baseMetal" | "baseMatte";
+const levelMaterialPools: Record<LevelMaterialKind, Material[]> = {
+  dome: [],
+  baseMetal: [],
+  baseMatte: [],
+};
+
+function acquireLevelMaterial(
+  kind: LevelMaterialKind,
+  canonical: Material,
+  key: string,
+): Material {
+  const pool = levelMaterialPools[kind];
+  let m = pool.pop();
+  while (m && (m as any).poolKey !== key) {
+    // Сменился уровень качества — клон устарел, утилизируем и ищем дальше.
+    (m as any).isCached = false;
+    m.dispose();
+    m = pool.pop();
+  }
+  if (!m) {
+    m = canonical.clone();
+    // Material.copy НЕ переносит node-экспандо (`emissiveNode` контура «мелочи»
+    // на WebGPU) — переносим ссылкой: общий граф → общий текст шейдера.
+    const node = (canonical as any).emissiveNode;
+    if (node !== undefined) (m as any).emissiveNode = node;
+    (m as any).isCached = true;
+    (m as any).poolKey = key;
+    m.name = `${canonical.name || kind}-clone`; // метка для perf-диагностики
+  }
+  return m;
+}
+
+// Возврата клона в levelMaterialPools больше нет: клон закрепляется за пуловым
+// мешом навсегда (пара «меш+материал» и есть единица пула, см. meshPool ниже);
+// пул клонов остался только как источник при создании новой пары.
+
+/**
+ * Пул ЖИВЫХ `InstancedMesh` по «виду» (`bld-<категория>` | `dome` | `baseMetal` |
+ * `baseMatte` | `dots` | `dome-flight`). Зачем: WebGPU-рендер three замешивает в
+ * ключ кэша `NodeBuilderState` uuid САМОГО меша (`RenderObject.getMaterialCacheKey`,
+ * upstream-TODO three#29066) — каждый новый `InstancedMesh` промахивает кэш, и
+ * рендер заново гоняет node-builder (~40мс CPU × число проходов: MRT, тени,
+ * рефлектор). Это оставшийся фриз drill/up ПОСЛЕ стабилизации текста WGSL
+ * (см. `INSTANCE_CAPACITY`): текст совпадает (компиляций нет), но генерация
+ * node-состояний повторяется. Переиспользование самого ОБЪЕКТА меша сохраняет
+ * его `RenderObject` и `nodeBuilderState` → повторный drill не строит ничего.
+ *
+ * Меш живёт В ПАРЕ со своими материалами (ключ RenderObject включает и объект,
+ * и материал): у зданий набор материалов закрепляется за мешом навсегда, у
+ * купола/плит — per-level клон (см. `acquireLevelMaterial`) остаётся в паре и в
+ * `levelMaterialPools` больше не возвращается. На acquire матрицы/цвета уровня
+ * переписываются поверх, фактическое число инстансов задаёт `mesh.count`,
+ * сфера отсечения сбрасывается. Устаревшие по quality-ключу записи утилизируются.
+ */
+interface PooledMesh {
+  mesh: InstancedMesh;
+  /** Эталонные цвета материалов (только у зданий) — для decor-фейда уровня. */
+  designed?: Color[];
+  /** Материалы принадлежат записи (клоны/наборы) — утилизировать при устаревании.
+   *  `false` — материал общий кэшированный (dots, flight), не трогать. */
+  ownsMaterials: boolean;
+  poolKey: string;
+}
+
+const meshPool = new Map<string, PooledMesh[]>();
+
+function meshPoolKey(): string {
+  const q = quality.active;
+  return `${q.backend}_${q.pbr}_${q.roundSegments}_${q.frostedGlass}_${q.glassExtras}`;
+}
+
+function disposePooledDeep(e: PooledMesh): void {
+  if (e.ownsMaterials) {
+    const mats = Array.isArray(e.mesh.material)
+      ? e.mesh.material
+      : [e.mesh.material];
+    for (const m of mats) {
+      (m as any).isCached = false;
+      m.dispose();
+    }
+  }
+  // Геометрии всегда общие кэшированные — их утилизируют их собственные кэши.
+  e.mesh.dispose(); // снять GPU-данные RenderObject'а и слушатели
+}
+
+function acquireFromPool(
+  kind: string,
+  count: number,
+  create: () => Omit<PooledMesh, "poolKey">,
+): PooledMesh {
+  const key = meshPoolKey();
+  let pool = meshPool.get(kind);
+  if (!pool) {
+    pool = [];
+    meshPool.set(kind, pool);
+  }
+  // Устаревшие по quality-ключу записи утилизируем (материалы/геометрии под
+  // новый ключ пересозданы их собственными кэшами).
+  for (let i = pool.length - 1; i >= 0; i--) {
+    if (pool[i].poolKey !== key) {
+      disposePooledDeep(pool[i]);
+      pool.splice(i, 1);
+    }
+  }
+  let entry: PooledMesh | undefined;
+  for (let i = 0; i < pool.length; i++) {
+    // Ёмкость буфера матриц (instanceMatrix.count) должна вмещать запрос.
+    if (pool[i].mesh.instanceMatrix.count >= count) {
+      entry = pool[i];
+      pool.splice(i, 1);
+      break;
+    }
+  }
+  if (!entry) {
+    entry = { ...create(), poolKey: key };
+    entry.mesh.userData.poolKind = kind;
+    entry.mesh.userData.poolEntry = entry;
+  }
+  const mesh = entry.mesh;
+  mesh.count = count;
+  mesh.boundingSphere = null; // матрицы переписываются — сфера пересчитается
+  // Сброс к дефолтам: владелец (call-site) переопределяет что нужно.
+  mesh.frustumCulled = true;
+  mesh.renderOrder = 0;
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  delete mesh.userData.disposeExtra;
+  return entry;
+}
+
+/** Вернуть пуловый меш (no-op с `false`, если меш не из пула). */
+function releasePooledMesh(mesh: InstancedMesh): boolean {
+  const entry = mesh.userData.poolEntry as PooledMesh | undefined;
+  if (!entry) return false;
+  if (entry.poolKey !== meshPoolKey()) {
+    disposePooledDeep(entry); // сменилось качество, пока меш был в уровне
+    return true;
+  }
+  meshPool.get(mesh.userData.poolKind as string)?.push(entry);
+  return true;
+}
+
+/** Меш зданий категории: геометрия+материалы из buildings.ts, эталоны в записи. */
+function acquireBuildingMesh(category: Category, count: number): PooledMesh {
+  const e = acquireFromPool(`bld-${category}`, count, () => {
+    const def = makeBuildingDef(category);
+    return {
+      mesh: makeInstancedMesh(def.geometry, def.materials, count),
+      designed: def.designedColors,
+      ownsMaterials: true,
+    };
+  });
+  // Вернуть эталонные цвета: decor-фейд прошлого уровня мог их притушить.
+  (e.mesh.material as Material[]).forEach((m, i) =>
+    (m as MeshStandardMaterial).color.copy(e.designed![i]),
+  );
+  return e;
+}
+
+/** Меш куполов +1 (в паре с per-level клоном стекла). */
+function acquirePooledDomeMesh(count: number): InstancedMesh {
+  const e = acquireFromPool("dome", count, () => ({
+    mesh: makeInstancedMesh(
+      makeDomeGeometry(),
+      acquireLevelMaterial(
+        "dome",
+        getCachedDomeMaterial("static"),
+        getQualityKey(),
+      ),
+      count,
+    ),
+    ownsMaterials: true,
+  }));
+  (e.mesh.material as MeshStandardMaterial).color.setRGB(1, 1, 1);
+  return e.mesh;
+}
+
+/** Меш плит-постаментов (металл +1/+2 либо матовый +3), клон в паре. */
+function acquirePooledBaseMesh(metal: boolean, count: number): InstancedMesh {
+  const kind = metal ? "baseMetal" : "baseMatte";
+  const e = acquireFromPool(kind, count, () => ({
+    mesh: makeInstancedMesh(
+      getCachedDomeGeometry(),
+      acquireLevelMaterial(
+        kind as LevelMaterialKind,
+        getCachedBaseMaterial(metal),
+        getBaseQualityKey(),
+      ),
+      count,
+    ),
+    ownsMaterials: true,
+  }));
+  (e.mesh.material as MeshStandardMaterial).color.setRGB(1, 1, 1);
+  return e.mesh;
+}
+
+/** Меш точек dot-grid (общие геометрия/материал — не в собственности записи). */
+function acquirePooledDotMesh(count: number): InstancedMesh {
+  const { geo, mat } = getDotResources();
+  return acquireFromPool("dots", count, () => ({
+    mesh: makeInstancedMesh(geo, mat, count),
+    ownsMaterials: false,
+  })).mesh;
+}
+
+/** Меш «роя» куполов drill-анимации (общий кэшированный flight-материал). */
+function acquirePooledFlightMesh(count: number): InstancedMesh {
+  return acquireFromPool("dome-flight", count, () => ({
+    mesh: makeInstancedMesh(
+      makeDomeGeometry(),
+      getCachedDomeMaterial("flightInstanced"),
+      count,
+    ),
+    ownsMaterials: false,
+  })).mesh;
+}
+
+/** Все категории — для прогрева пула (см. `acquireWarmLevelMeshes`). */
+const ALL_CATEGORIES: readonly Category[] = [
+  "other",
+  "code",
+  "document",
+  "image",
+  "video",
+  "audio",
+  "archive",
+  "binary",
+];
+
+/**
+ * Прогрев пула мешей РЕАЛЬНЫМИ боевыми экземплярами (для `compile()`
+ * scene.webgpu.ts): по одному пуловому мешу каждого вида с одним инстансом.
+ * После прогрева `release()` возвращает меши в пул — первый уровень заберёт
+ * именно их, с уже построенными node-состояниями и пайплайнами всех проходов.
+ */
+export function acquireWarmLevelMeshes(): {
+  group: Group;
+  release: () => void;
+} {
+  const group = new Group();
+  const identity = new Matrix4();
+  const white = new Color(0xffffff);
+  const shadows = quality.active.shadows;
+  const acquired: InstancedMesh[] = [];
+  const add = (mesh: InstancedMesh, colored: boolean, cast: boolean): void => {
+    mesh.setMatrixAt(0, identity);
+    mesh.instanceMatrix.needsUpdate = true;
+    if (colored) {
+      // Наличие instanceColor меняет текст шейдера — боевые меши цветные всегда.
+      mesh.setColorAt(0, white);
+      mesh.instanceColor!.needsUpdate = true;
+    }
+    mesh.frustumCulled = false; // draw call обязан состояться (меш спрятан под землёй)
+    mesh.castShadow = cast;
+    mesh.receiveShadow = cast;
+    acquired.push(mesh);
+    group.add(mesh);
+  };
+  for (const cat of ALL_CATEGORIES)
+    add(acquireBuildingMesh(cat, 1).mesh, true, shadows);
+  add(acquirePooledDomeMesh(1), true, false);
+  add(acquirePooledBaseMesh(true, 1), true, shadows);
+  add(acquirePooledBaseMesh(false, 1), true, shadows);
+  add(acquirePooledDotMesh(1), true, false);
+  add(acquirePooledFlightMesh(1), false, false);
+  return {
+    group,
+    release() {
+      for (const m of acquired) {
+        group.remove(m);
+        releasePooledMesh(m);
+      }
+    },
+  };
+}
+
+/**
+ * Фоновый догрев ЗАПАСНОГО комплекта пула — по одному виду за вызов. Уровни
+ * живут стопкой decor'ов и ДЕРЖАТ свои меши, поэтому после каждого drill пул
+ * пустеет: следующий drill создавал бы новые `InstancedMesh` прямо на свопе
+ * (новый uuid → полный прогон node-builder по всем проходам — статтер ~1с).
+ * Владелец кадра (scene.webgpu) после свопа вызывает это раз в кадр: вызов
+ * возвращает подготовленный к скрытому draw меш первого вида, у которого в
+ * пуле нет свободного экземпляра (под текущий quality-ключ), либо `null`,
+ * когда комплект полон. Меш нужно один кадр отрисовать (node-состояния всех
+ * проходов построятся) и вернуть через `poolSpareRelease`.
+ *
+ * dots греем с запасом ёмкости 8192 (частый вид с большим count — dot-grid
+ * земли легко за тысячи), остальным хватает базовой `INSTANCE_CAPACITY`.
+ */
+export function poolSpareNext(): InstancedMesh | null {
+  const key = meshPoolKey();
+  const shadows = quality.active.shadows;
+  interface SpareSpec {
+    kind: string;
+    cast: boolean;
+    colored: boolean;
+    count: number;
+    acquire: (n: number) => InstancedMesh;
+  }
+  const specs: SpareSpec[] = [
+    ...ALL_CATEGORIES.map((c) => ({
+      kind: `bld-${c}`,
+      cast: shadows,
+      colored: true,
+      count: 1,
+      acquire: (n: number) => acquireBuildingMesh(c, n).mesh,
+    })),
+    {
+      kind: "dome",
+      cast: false,
+      colored: true,
+      count: 1,
+      acquire: (n) => acquirePooledDomeMesh(n),
+    },
+    {
+      kind: "baseMetal",
+      cast: shadows,
+      colored: true,
+      count: 1,
+      acquire: (n) => acquirePooledBaseMesh(true, n),
+    },
+    {
+      kind: "baseMatte",
+      cast: shadows,
+      colored: true,
+      count: 1,
+      acquire: (n) => acquirePooledBaseMesh(false, n),
+    },
+    {
+      kind: "dots",
+      cast: false,
+      colored: true,
+      count: 8192,
+      acquire: (n) => acquirePooledDotMesh(n),
+    },
+    {
+      kind: "dome-flight",
+      cast: false,
+      colored: false,
+      count: 1,
+      acquire: (n) => acquirePooledFlightMesh(n),
+    },
+  ];
+  for (const s of specs) {
+    if (meshPool.get(s.kind)?.some((p) => p.poolKey === key)) continue;
+    const mesh = s.acquire(s.count);
+    // Подготовка к скрытому draw (как в acquireWarmLevelMeshes): один живой
+    // инстанс, остальные — нулевые матрицы (вырождены, не видны).
+    mesh.setMatrixAt(0, new Matrix4());
+    mesh.instanceMatrix.needsUpdate = true;
+    if (s.colored) {
+      mesh.setColorAt(0, new Color(0xffffff));
+      mesh.instanceColor!.needsUpdate = true;
+    }
+    mesh.frustumCulled = false; // draw call обязан состояться (меш спрятан)
+    mesh.castShadow = s.cast;
+    mesh.receiveShadow = s.cast;
+    return mesh;
+  }
+  return null;
+}
+
+/** Вернуть отрисованный догревочный меш (см. `poolSpareNext`) обратно в пул. */
+export function poolSpareRelease(mesh: InstancedMesh): void {
+  releasePooledMesh(mesh);
 }
 
 function makeDomeMaterial(
@@ -929,7 +1406,7 @@ function makeDomeMaterial(
     }
     if (quality.active.backend === "webgpu") {
       const tsl = TSL as any;
-      
+
       // Точная проверка попадания точки XZ в прямоугольные границы папки "Мелочь"
       const diffX = positionWorld.x.sub(aggregatedFolderPos.x).abs();
       const diffZ = positionWorld.z.sub(aggregatedFolderPos.z).abs();
@@ -937,18 +1414,23 @@ function makeDomeMaterial(
       const inZ = aggregatedFolderHalfD.sub(diffZ).clamp(0, 1).sign();
       const isAgg = inX.mul(inZ); // 1.0 внутри прямоугольника, 0.0 снаружи
       const glowColor = isAgg.mix(tslColor(0x0088ff), tslColor(0x8b7df0));
-      
+
       // 1. Краевой неоновый контур (Френель) — интенсивность 0.2
       const fresnel = float(1.0).sub(normalView.z.clamp(0, 1)).pow(3.5);
       const fresnelGlow = fresnel.mul(glowColor).mul(0.2);
-      
+
       // 2. Движущаяся волна цифрового сканирования по высоте купола (без масок и фильтров)
       const scanY = tsl.positionLocal.y.add(tsl.time.mul(0.15)).mul(12.0);
       const scanWave = scanY.sin().smoothstep(0.9, 0.98);
       const scanline = glowColor.mul(scanWave).mul(0.08);
-      
-      // Объединяем эффекты
-      (mat as any).emissiveNode = fresnelGlow.add(scanline);
+
+      // Свечение × opacity: контур обязан гаснуть вместе со стеклом при
+      // drill/up-фейде (applyDomeProgress мутирует mat.opacity), иначе на
+      // полностью растворённом куполе остаётся висеть неоновый силуэт ~20%
+      // (интенсивность контура) до самого dispose.
+      (mat as any).emissiveNode = fresnelGlow
+        .add(scanline)
+        .mul(tsl.materialOpacity);
     }
     if (flight) mat.color.set(GLASS_COLOR);
     return mat;
@@ -1060,9 +1542,10 @@ export function createDomeFlight(
   // Один InstancedMesh на весь рой (а не меш на купол): все купола едут по одной кривой,
   // прозрачность общая (`material.opacity`), различается лишь подъём по Y — это идеально
   // ложится на инстансинг (1 draw call, 1 дорогой transmission-материал вместо N).
-  const geometry = makeDomeGeometry();
-  const material = getCachedDomeMaterial("flightInstanced");
-  const mesh = new InstancedMesh(geometry, material, descs.length);
+  // Меш — из пула (см. `meshPool`): новый InstancedMesh на каждый drill заставлял
+  // рендер строить node-состояния заново (uuid в ключе кэша) прямо на старте твина.
+  const mesh = acquirePooledFlightMesh(descs.length);
+  const material = mesh.material as MeshPhysicalMaterial | MeshLambertMaterial;
   mesh.renderOrder = 3; // поверх непрозрачных, как и обычный купол
   mesh.frustumCulled = false; // инстансы едут вверх — bbox не пересоберём покадрово
   group.add(mesh);
@@ -1087,9 +1570,9 @@ export function createDomeFlight(
       material.opacity = domeOpacity(t); // общий для роя — все тают одной кривой
     },
     dispose() {
-      geometry.dispose();
-      if (!(material as any).isCached) material.dispose();
-      group.clear();
+      // Меш возвращается в пул (геометрия/материал общие кэшированные — живут).
+      group.remove(mesh);
+      releasePooledMesh(mesh);
       group.parent?.remove(group);
     },
   };
@@ -1117,11 +1600,13 @@ export function buildLevel(
   const { districts, buildings } = layoutNested(nodes, span, nowSeconds);
 
   // Обновляем позицию и точные габариты папки "Мелочь" для шейдера купола WebGPU
-  const aggDistrict = districts.find((d) => d.node.flags.includes("aggregated"));
+  const aggDistrict = districts.find((d) =>
+    d.node.flags.includes("aggregated"),
+  );
   if (aggDistrict) {
     const full = layoutToWorld(aggDistrict.rect, 0);
-    const dw = Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2);
-    const dd = Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2);
+    const dw = Math.max(1, full.width - domeGlassInset(full.width) * 2);
+    const dd = Math.max(1, full.depth - domeGlassInset(full.depth) * 2);
     aggregatedFolderPos.value.set(full.centerX, 0, full.centerZ);
     aggregatedFolderHalfW.value = dw / 2 + 0.5; // небольшой запас в 0.5 единицы на сглаживание
     aggregatedFolderHalfD.value = dd / 2 + 0.5;
@@ -1137,7 +1622,7 @@ export function buildLevel(
   // Флаг читаем один раз на сборку — согласован с `renderer.shadowMap.enabled`.
   const shadows = quality.active.shadows;
 
-  const ground = makeFadedGround(span);
+  const ground = acquireGround(span);
   ground.receiveShadow = shadows;
   group.add(ground);
   // Dot-grid земли (vision §II.4) — регулярная мировая сетка точек по всему апрону,
@@ -1186,8 +1671,10 @@ export function buildLevel(
       else byCat.set(b.node.category, [b]);
     }
     for (const [cat, list] of byCat) {
-      const def = makeBuildingDef(cat);
-      const mesh = new InstancedMesh(def.geometry, def.materials, list.length);
+      // Меш категории — из пула (см. `meshPool`): переиспользование объекта меша
+      // сохраняет node-состояния рендера, drill не перестраивает ничего.
+      const pooled = acquireBuildingMesh(cat, list.length);
+      const mesh = pooled.mesh;
       mesh.castShadow = shadows;
       mesh.receiveShadow = shadows;
       const items: BuildItem[] = [];
@@ -1214,14 +1701,22 @@ export function buildLevel(
           depth:
             b.districtIdx !== null ? districts[b.districtIdx].d3depth + 1 : 1,
         };
+        // Нейтральный per-instance множитель СРАЗУ при сборке. Иначе instanceColor
+        // появлялся бы лениво (первый setEnterDim/paintAll) — а его наличие меняет
+        // ТЕКСТ шейдера: рендер выкидывал «бесцветную» программу и компилировал
+        // «цветную» прямо во время drill (главный источник статтера на WebGPU;
+        // прогрев scene.webgpu.compile() тоже грел именно цветной вариант).
+        mesh.setColorAt(i, color.setRGB(1, 1, 1));
       });
       mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      // Возврат меша (в паре с материалами) в пул — в disposeGroup по poolEntry.
       const g: BuildGroup = {
         mesh,
         items,
         real,
         pick,
-        designed: def.designedColors,
+        designed: pooled.designed!,
       };
       buildGroups.push(g);
       buildGroupByMesh.set(mesh, g);
@@ -1256,28 +1751,19 @@ export function buildLevel(
     // `makeDomeMaterial(false)`) решает купол-vs-купол пофрагментно (иначе порядок
     // буфера красил бы дальние поверх ближних при повороте камеры); просвечивание
     // держится тем, что домики внутри попадают в transmission-буфер ДО купола.
-    domeMesh = new InstancedMesh(
-      makeDomeGeometry(),
-      getCachedDomeMaterial("static"),
-      districts.length,
-    );
+    // Меши купола/плит — из пула (см. `meshPool`), каждый в паре со своим
+    // per-level КЛОНОМ материала: decor-фейд мутирует его color, общий
+    // кэшированный материал трогать нельзя. Возврат в пул — в disposeGroup.
+    domeMesh = acquirePooledDomeMesh(districts.length);
     domeMesh.renderOrder = 2; // после непрозрачных (здания/плиты)
     // Плита-постамент: тот же скруглённый куб, что и купол (совпадение кривизны
     // углов). Металл (+1/+2) виден за счёт отражений env-map (см. scene.ts); на
     // минимальном уровне — дешёвый матовый Lambert (см. makeBaseMaterial).
-    baseMesh = new InstancedMesh(
-      getCachedDomeGeometry(),
-      getCachedBaseMaterial(true),
-      districts.length,
-    );
+    baseMesh = acquirePooledBaseMesh(true, districts.length);
     baseMesh.castShadow = shadows;
     baseMesh.receiveShadow = shadows;
     // Матовая плита вложенных папок +3 (без металлики) — глубинная детализация.
-    baseMatteMesh = new InstancedMesh(
-      getCachedDomeGeometry(),
-      getCachedBaseMaterial(false),
-      districts.length,
-    );
+    baseMatteMesh = acquirePooledBaseMesh(false, districts.length);
     baseMatteMesh.castShadow = shadows;
     baseMatteMesh.receiveShadow = shadows;
     // Купола-стекло тени НЕ отбрасывают/принимают (полупрозрачные, дали бы грязь).
@@ -1291,12 +1777,16 @@ export function buildLevel(
       let baseW: number;
       let baseD: number;
       if (d.d3depth === 1) {
-        const dw = Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2);
-        const dd = Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2);
-        baseW = dw + RING_RIM * 2;
-        baseD = dd + RING_RIM * 2;
+        // Плита — по КОНСТАНТНОМУ инсету (габарит не зависит от размера района →
+        // соседние плиты не слипаются даже у мелких куполов).
+        baseW = Math.max(1, full.width - DOME_FOOTPRINT_INSET * 2) + RING_RIM * 2;
+        baseD = Math.max(1, full.depth - DOME_FOOTPRINT_INSET * 2) + RING_RIM * 2;
 
         // Стеклянный купол: накрывает поднятое содержимое (footprint утоплен).
+        // Инсет стекла АДАПТИВНЫЙ по осям — у мелких/узких куполов тянется наружу,
+        // чтобы застройка не вылезала за стекло (см. `domeGlassInset`).
+        const dw = Math.max(1, full.width - domeGlassInset(full.width) * 2);
+        const dd = Math.max(1, full.depth - domeGlassInset(full.depth) * 2);
         const h = domeHeight(d);
         dummy.position.set(full.centerX, h / 2, full.centerZ);
         dummy.scale.set(dw, h, dd);
@@ -1309,6 +1799,10 @@ export function buildLevel(
         baseD = full.depth;
         domeReal[j] = ZERO_MATRIX;
         domeMesh!.setMatrixAt(j, ZERO_MATRIX);
+        // Инстанс вырожден (ZERO), но цвет держим согласованным с paintAll — и
+        // instanceColor гарантированно есть с первого кадра (иначе ленивое
+        // появление меняло бы шейдер меша, см. комментарий у зданий).
+        domeMesh!.setColorAt(j, color.set(GLASS_COLOR));
       }
 
       // Сама плита: стоит на `floorY` (полу родителя), высотой `baseHeight`.
@@ -1563,7 +2057,8 @@ export function buildLevel(
       },
       dispose() {
         group.remove(mesh);
-        mesh.geometry.dispose();
+        // Геометрия — общая кэшированная (makeDomeGeometry): не dispose'ить.
+        if (!(mesh.geometry as any).isCached) mesh.geometry.dispose();
         if (!(mat as any).isCached) mat.dispose();
       },
     };
@@ -1762,6 +2257,63 @@ const GROUND_REFLECT = 0.16;
 const GROUND_VIGNETTE_FULL = 0.825;
 
 /**
+ * Пул готовых «земель» (mesh + материал + рефлектор). Земля строится КАНОНИЧЕСКИ
+ * (для span = CITY_SPAN) один раз и под конкретный уровень МАСШТАБИРУЕТСЯ
+ * (`mesh.scale`): радиальный градиент/aFade запечены ДОЛЯМИ размера, поэтому
+ * подобие сохраняет картинку точно. Зачем пул, а не сборка на уровень: на WebGPU
+ * каждый новый `reflector()` — это новый RT/узел-текстура → новый ключ шейдера
+ * пола → компиляция WGSL на первом кадре нового уровня (заметная доля статтера
+ * drill/up). Возврат — через `userData.disposeExtra` (см. `disposeGroup`);
+ * геометрия/материал помечены `isCached`. Пул ключуется бэкендом: при смене
+ * WebGL↔WebGPU устаревшие земли утилизируются.
+ */
+interface GroundHandle {
+  mesh: Mesh;
+  key: string;
+  /** Полная утилизация (RT рефлектора + геометрия + материал) — при смене ключа. */
+  disposeDeep: () => void;
+}
+const groundPool: GroundHandle[] = [];
+
+function acquireGround(span: LevelSpan): Mesh {
+  const key = quality.active.backend;
+  let handle: GroundHandle | null = null;
+  while (groundPool.length > 0) {
+    const h = groundPool.pop()!;
+    if (h.key === key) {
+      handle = h;
+      break;
+    }
+    h.disposeDeep(); // сменился бэкенд — материал чужого рендера
+  }
+  if (!handle) handle = buildCanonicalGround(key);
+  const mesh = handle.mesh;
+  mesh.scale.setScalar(Math.max(span.w, span.d) / CITY_SPAN);
+  mesh.visible = true; // мог вернуться скрытым (setGroundShown)
+  return mesh;
+}
+
+function releaseGround(handle: GroundHandle): void {
+  if (handle.key !== quality.active.backend) handle.disposeDeep();
+  else groundPool.push(handle);
+}
+
+/**
+ * Прогревочная земля для `compile()` сцены: РЕАЛЬНЫЙ пуловый экземпляр (с
+ * рефлектором на WebGPU) — пара отрисованных кадров компилирует его программу и
+ * программы reflector-прохода остальных прогреваемых материалов; `release`
+ * возвращает землю в пул, и ПЕРВЫЙ уровень заберёт уже готовый экземпляр
+ * (сборка стартового города без компиляции пола).
+ */
+export function warmupGround(): { mesh: Mesh; release: () => void } {
+  const mesh = acquireGround({ w: CITY_SPAN, d: CITY_SPAN });
+  return {
+    mesh,
+    release: () => (mesh.userData.disposeExtra as () => void)(),
+  };
+}
+
+/**
  * Земля-«апрон»: большой матовый план вокруг города (×GROUND_APRON), цвет
  * радиально гаснет к краям из `GROUND_COLOR` в `GROUND_EDGE_COLOR` (=--bg) через
  * vertex-colors — у города нет «парящего» острого края, он тает в фон.
@@ -1775,12 +2327,10 @@ const GROUND_VIGNETTE_FULL = 0.825;
  *   - всё лерпится в чистый `GROUND_EDGE_COLOR` (=--bg) виньеткой `toBg` от
  *     центра земли (ужатая кривая aFade, полный фон на `GROUND_VIGNETTE_FULL`
  *     её доли) — как на maximal, статично относительно земли.
- * RT рефлектора живёт вне материала → его `dispose` — через
- * `userData.disposeExtra` (см. `disposeGroup`). Невидимая земля (setGroundShown)
- * рефлектором не рендерится.
+ * Невидимая земля (setGroundShown) рефлектором не рендерится.
  */
-function makeFadedGround(span: LevelSpan): Mesh {
-  const S = Math.max(span.w, span.d) * GROUND_APRON;
+function buildCanonicalGround(key: string): GroundHandle {
+  const S = CITY_SPAN * GROUND_APRON;
   const geo = new PlaneGeometry(S, S, 48, 48);
   const base = new Color(GROUND_COLOR);
   const edge = new Color(GROUND_EDGE_COLOR);
@@ -1802,6 +2352,7 @@ function makeFadedGround(span: LevelSpan): Mesh {
   geo.setAttribute("color", new Float32BufferAttribute(colors, 3));
   let material: Material;
   let ground: Mesh;
+  let disposeReflector: (() => void) | null = null;
   if (fadeArr) {
     // Кривую угасания несёт атрибут aFade (0 центр → 1 край), из него в шейдере
     // выводится и сила отражения, и «плавное затемнение» периферии.
@@ -1841,7 +2392,9 @@ function makeFadedGround(span: LevelSpan): Mesh {
       .mul(attenuation)
       .mul(float(0.0025));
 
-    const baseColor = attribute("color", "vec3").add(reflNode.rgb.mul(float(GROUND_REFLECT)));
+    const baseColor = attribute("color", "vec3").add(
+      reflNode.rgb.mul(float(GROUND_REFLECT)),
+    );
     const litBaseColor = baseColor.add(lightContrib);
 
     mat.colorNode = litBaseColor
@@ -1852,7 +2405,7 @@ function makeFadedGround(span: LevelSpan): Mesh {
     // target задаёт плоскость отражения: дитё пола наследует его поворот/рибейз
     // навигатора (G⁻¹), зеркало всегда совпадает с землёй.
     ground.add(reflNode.target);
-    ground.userData.disposeExtra = () => reflNode.dispose();
+    disposeReflector = () => reflNode.dispose();
   } else {
     material = new MeshLambertMaterial({ vertexColors: true });
     ground = new Mesh(geo, material);
@@ -1860,7 +2413,22 @@ function makeFadedGround(span: LevelSpan): Mesh {
   ground.name = "ground";
   ground.rotation.x = -Math.PI / 2; // в плоскость XZ
   ground.position.y = -0.3; // чуть ниже основания зданий и подиума
-  return ground;
+  // Ресурсы пуловые: disposeGroup их не трогает, утилизация — только в disposeDeep.
+  (geo as any).isCached = true;
+  (material as any).isCached = true;
+  (material as Material).name = "ground"; // метка для perf-диагностики
+  const handle: GroundHandle = {
+    mesh: ground,
+    key,
+    disposeDeep() {
+      disposeReflector?.();
+      geo.dispose();
+      material.dispose();
+    },
+  };
+  // На dispose уровня земля возвращается в пул (см. disposeGroup).
+  ground.userData.disposeExtra = () => releaseGround(handle);
+  return handle;
 }
 
 /** Одна точка дороги: позиция (мир XZ), масштаб и «яркость» (смешение с белым). */
@@ -1900,13 +2468,29 @@ function buildGroundDots(span: LevelSpan): InstancedMesh {
  * радиальным угасанием) → подмешан к белому на «яркость» точки, так далёкие точки
  * тают вместе с землёй.
  */
+/** Общие геометрия/материал точек dot-grid: цвет и матрицы у точек per-instance,
+ *  сам материал никем не мутируется — безопасно делить между уровнями (и не
+ *  пересоздавать пайплайн на каждый drill). */
+let dotGeometry: CircleGeometry | null = null;
+let dotMaterial: MeshBasicMaterial | null = null;
+
+function getDotResources(): { geo: CircleGeometry; mat: MeshBasicMaterial } {
+  if (!dotGeometry) {
+    dotGeometry = new CircleGeometry(DOT_R, 10);
+    (dotGeometry as any).isCached = true;
+  }
+  if (!dotMaterial) {
+    dotMaterial = new MeshBasicMaterial();
+    (dotMaterial as any).isCached = true;
+    dotMaterial.name = "dots"; // метка для perf-диагностики
+  }
+  return { geo: dotGeometry, mat: dotMaterial };
+}
+
 function makeDotMesh(dots: DotSpec[], span: LevelSpan): InstancedMesh {
   const half = (Math.max(span.w, span.d) * GROUND_APRON) / 2;
-  const mesh = new InstancedMesh(
-    new CircleGeometry(DOT_R, 10),
-    new MeshBasicMaterial(),
-    dots.length,
-  );
+  // Меш — из пула (см. `meshPool`): возврат в disposeGroup по poolEntry.
+  const mesh = acquirePooledDotMesh(dots.length);
   const dummy = new Object3D();
   const base = new Color(GROUND_COLOR);
   const edge = new Color(GROUND_EDGE_COLOR);
@@ -1941,6 +2525,9 @@ function disposeGroup(group: Group): void {
   };
   for (const child of [...group.children]) {
     group.remove(child);
+    // Пуловые InstancedMesh возвращаются в пул ЖИВЫМИ (вместе со своими
+    // материалами) — их RenderObject/node-состояния переживают drill/up.
+    if (child instanceof InstancedMesh && releasePooledMesh(child)) continue;
     // Ресурсы вне geometry/material (RT рефлектора пола) — хук disposeExtra.
     if (typeof child.userData.disposeExtra === "function") {
       child.userData.disposeExtra();

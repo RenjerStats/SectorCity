@@ -86,6 +86,9 @@
   let handle: SceneHandle | undefined;
   let nav: CityNavigator | undefined;
   let interaction: InteractionController | undefined;
+  // Бэкенд текущего стека (WebGL↔WebGPU). Компонентного уровня — нужен и в onMount
+  // (подъём/ремоунт стека), и в `scanFolder`/`compileShaders` вне него.
+  let currentBackend: "webgl" | "webgpu" = "webgl";
   // Два независимых оверлея-окна одного стиля: cardEl — полное на ВЫБРАННОМ
   // (с разворотом), hoverEl — мини на НАВЕДЁННОМ (компактное, без анимации).
   // Позицию ставим императивно покадрово; контент — реактивно из сторов.
@@ -114,6 +117,7 @@
   // частотное — обычный $state; "none" = город виден, оверлей не рисуется.
   type StatusKind =
     | "loading"
+    | "compiling"
     | "welcome"
     | "empty"
     | "error"
@@ -392,11 +396,46 @@
     return nodes.length;
   }
 
+  /**
+   * Прекомпиляция шейдеров с честным экраном «Компиляция шейдеров…».
+   *
+   * На WebGPU первый прогрев конвейера (node-граф TSL: MRT-проход + transmission-
+   * купола + тени + SSGI/TRAA/bloom) занимает несколько секунд — раньше это время
+   * пряталось под оверлеем «Загружаю снимок…», что вводило в заблуждение (снимок
+   * из БД к тому моменту уже прочитан). Показываем отдельный экран под правду.
+   *
+   * Тонкость с отрисовкой: `statusKind = "compiling"` лишь ПЛАНИРУЕТ обновление DOM
+   * (Svelte применит в микротаске), а тяжёлый `pipeline.render()` внутри `compile()`
+   * выполняется в rAF-тике — ДО того как браузер успеет покрасить кадр. Без явной
+   * уступки потока «Компиляция шейдеров…» появлялась бы лишь на 100–200 мс в самом
+   * конце прогрева, а всё это время на экране висел бы прежний оверлей. Поэтому
+   * ждём реальный кадр (`nextPaint`) ПЕРЕД запуском прогрева — тогда экран честно
+   * покрашен на все ~секунды компиляции.
+   *
+   * На WebGL компиляция синхронна и практически мгновенна — оверлей не трогаем,
+   * иначе он мигнёт на кадр. Вызывающий сам ставит финальный `statusKind` после.
+   */
+  async function compileShaders(): Promise<void> {
+    if (currentBackend === "webgpu") {
+      statusKind = "compiling";
+      await nextPaint();
+    }
+    await handle?.compile();
+  }
+
+  /** Дождаться реальной отрисовки кадра: двойной rAF (первый колбэк идёт ДО пейнта,
+   *  второй — уже после), поэтому к резолву как минимум один пейнт состоялся. */
+  function nextPaint(): Promise<void> {
+    return new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+  }
+
   onMount(() => {
-    // Бэкенд текущего стека и отписки его покадровых оверлеев. Смена уровня графики
-    // ЧЕРЕЗ границу WebGL↔WebGPU пересоздаёт весь стек (бэкенд нельзя переключить на
-    // живом canvas), поэтому держим их отдельно и умеем срывать/поднимать заново.
-    let currentBackend: "webgl" | "webgpu" = "webgl";
+    // Отписки покадровых оверлеев текущего стека. Смена уровня графики ЧЕРЕЗ границу
+    // WebGL↔WebGPU пересоздаёт весь стек (бэкенд нельзя переключить на живом canvas),
+    // поэтому держим их отдельно и умеем срывать/поднимать заново (`currentBackend` —
+    // компонентного уровня, объявлен выше).
     let frameOffs: (() => void)[] = [];
     let remounting = false;
     let disposed = false;
@@ -415,7 +454,8 @@
       fresh.className = canvas.className;
       canvas.replaceWith(fresh);
       canvas = fresh;
-      canvas.style.cursor = graphicsLevel.get() === "experimental" ? "none" : "";
+      canvas.style.cursor =
+        graphicsLevel.get() === "experimental" ? "none" : "";
     }
 
     /** Зарегистрировать покадровые оверлеи (LOD, окна над зданием, компас) на
@@ -542,7 +582,7 @@
       }
       try {
         await loadRoot(path); // перестроить уровень в свежем nav
-        await handle?.compile();
+        await compileShaders();
       } catch (err) {
         console.warn("пересборка уровня после ремоунта не удалась:", err);
       }
@@ -799,7 +839,8 @@
           );
           // Прекомпиляция шейдеров (transmission-купола + PMREM) ДО снятия оверлея:
           // иначе их синхронная сборка на первом кадре города даёт jank (§1.2).
-          await handle?.compile();
+          // На WebGPU переключает оверлей на честное «Компиляция шейдеров…».
+          await compileShaders();
           performance.mark("sc:first-compile:end");
           performance.measure(
             "sc:first-compile",
@@ -906,7 +947,7 @@
         const count = await loadRoot(root);
         // Свежепостроенный город = свежие материалы: прекомпилировать шейдеры до
         // снятия прогресс-панели, чтобы первый кадр не собирал их синхронно (§1.2).
-        await handle?.compile();
+        await compileShaders();
         breadcrumbs.set([{ path: root, name: crumbName(root) }]);
         appMode.set({ kind: "idle", path: root });
         // Пустой корень (нет файлов) → оверлей «папка пуста», иначе город виден.

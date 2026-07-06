@@ -3,6 +3,7 @@
 
   type StatusKind =
     | "loading"
+    | "compiling"
     | "welcome"
     | "empty"
     | "error"
@@ -27,11 +28,17 @@
     <div class="status-card">
       <!-- Бренд-глиф «полярная звезда» из точек (план §6): пульсирует, пока
            что-то грузится; в остальных состояниях — статичная марка. -->
-      <StarGlyph size={40} pulse={kind === "loading"} />
+      <StarGlyph size={40} pulse={kind === "loading" || kind === "compiling"} />
       {#if kind === "loading"}
         <h2 class="title">Загружаю снимок…</h2>
         <p class="description">
           Читаю снимок прошлого сканирования — город появится без рескана.
+        </p>
+      {:else if kind === "compiling"}
+        <h2 class="title">Компиляция шейдеров…</h2>
+        <p class="description">
+          Готовлю графический конвейер WebGPU — первый запуск компилирует
+          шейдеры, это занимает несколько секунд.
         </p>
       {:else if kind === "welcome"}
         <h2 class="title accent">SECTORCITY</h2>

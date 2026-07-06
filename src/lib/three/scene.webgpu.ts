@@ -29,17 +29,13 @@ import {
   AmbientLight,
   Color,
   DirectionalLight,
-  DoubleSide,
   Group,
-  InstancedMesh,
+  type InstancedMesh,
   Mesh,
-  MeshLambertMaterial,
-  MeshPhysicalMaterial,
   type Object3D,
   PCFShadowMap,
   PerspectiveCamera,
   Scene,
-  SphereGeometry,
   Vector3,
 } from "three";
 import { MapControls } from "three/examples/jsm/controls/MapControls.js";
@@ -61,7 +57,14 @@ import { traa } from "three/examples/jsm/tsl/display/TRAANode.js";
 import { Easing, Group as TweenGroup, Tween } from "@tweenjs/tween.js";
 import { INITIAL_CAMERA_POS, INITIAL_TARGET } from "./home";
 import { quality } from "./quality";
-import { makeBuildingDef } from "./buildings";
+import {
+  acquireWarmLevelMeshes,
+  getCachedDomeGeometry,
+  getCachedDomeMaterial,
+  poolSpareNext,
+  poolSpareRelease,
+  warmupGround,
+} from "./city";
 import type { SceneHandle } from "./scene";
 
 /**
@@ -88,8 +91,6 @@ export async function createSceneWebGPU(
 
   const scene = new Scene();
   scene.background = new Color(0x080808);
-
-
 
   // Окружение (IBL). PMREM из "three/webgpu" (знает про async-бэкенд, вызывать
   // ПОСЛЕ init). sigma здесь — радианы: 0.7 клипается (нужно 341 сэмпл при максимуме
@@ -254,16 +255,65 @@ export async function createSceneWebGPU(
   // эксклюзив WebGPU) → bloom. Граф SSGI на некоторых драйверах может не собраться —
   // тогда откат на bloom-only, затем на прямой рендер (устойчивость важнее эффекта).
   let pipeline: RenderPipeline | null = null;
+  // Узел TRAA боевого конвейера — для сброса истории при телепорте камеры.
+  let traaNode: ReturnType<typeof traa> | null = null;
+
+  // Кадр телепорта требует ДВОЙНОГО рендера (см. tick): флаг взводится
+  // invalidateTemporalHistory и потребляется циклом кадра.
+  let teleportFlush = false;
+
+  /** Форсировать needsRestart TRAANode (публичного reset у него нет): сброс
+   *  размера history-таргета → на ближайшем updateBefore узел переинициализирует
+   *  историю содержимым beauty-буфера. */
+  function resetTraaHistory(): void {
+    const rt = (
+      traaNode as {
+        _historyRenderTarget?: { setSize(w: number, h: number): void };
+      } | null
+    )?._historyRenderTarget;
+    rt?.setSize(1, 1);
+  }
+
+  /**
+   * Инвалидировать темпоральное состояние постобработки. Обязательно при
+   * ТЕЛЕПОРТЕ камеры (origin shift на свопе drill/up, resetView без анимации).
+   * Две беды на кадре телепорта:
+   *  1) история TRAA снята с ПРОШЛОЙ позиции камеры/прошлого уровня — денойз
+   *     подмешивал её в кадр («фантомные домики» прошлой папки);
+   *  2) узлы постобработки обновляются «корень раньше детей»: TRAA собирает
+   *     resolve в своём updateBefore ДО того, как RTT-композит/scene-pass
+   *     отрисуют новый кадр — на кадре свопа к презентации уходит картинка,
+   *     собранная из таргетов ПРОШЛОГО кадра (прошлый уровень целиком).
+   * Лечение: рестарт истории + второй render в том же rAF (см. tick) — к нему
+   * все таргеты уже держат новую сцену, презентуется именно он.
+   */
+  function invalidateTemporalHistory(): void {
+    resetTraaHistory();
+    teleportFlush = true;
+  }
 
   function buildPipeline(): void {
     if (!quality.active.post) return;
     try {
       // MRT сцены: beauty (output), диффуз-альбедо и нормали вида — их требует
       // композит SSGI, плюс velocity для темпорального денойза (TRAA). Нормали
-      // кладём как есть (SSGINode сам делает `.rgb.normalize()` при сэмпле).
+      // SSGINode нормализует сам (`.rgb.normalize()` при сэмпле).
+      //
+      // В normal/velocity ЯВНО кладём альфу материала: блендинг MRT-таргета
+      // берёт альфу из самого таргета, и без неё тающее стекло (drill-купол,
+      // fade через opacity) до самого dispose писало бы в эти буферы свои
+      // нормали и вектор подъёма В ПОЛНУЮ СИЛУ — SSGI рисовал купольное
+      // затенение, а TRAA размазывал фон по «движению» уже невидимого купола
+      // (призрак до конца зума; в WebGL, без SSGI/TRAA, фейд чистый). С альфой
+      // вклад прозрачного фрагмента в GI/reprojection гаснет вместе с ним.
       const scenePass = pass(scene, camera);
       scenePass.setMRT(
-        mrt({ output, diffuseColor, normal: normalView, velocity }),
+        mrt({
+          output,
+          diffuseColor,
+          normal: vec4(normalView, output.a),
+          velocity: vec4(velocity, 0, output.a),
+        }),
       );
       const colorNode = scenePass.getTextureNode("output");
       const diffuseNode = scenePass.getTextureNode("diffuseColor");
@@ -296,7 +346,8 @@ export async function createSceneWebGPU(
           add(colorNode.rgb.mul(giTex.a), diffuseNode.rgb.mul(giTex.rgb)),
           colorNode.a,
         );
-        litNode = traa(composite, depthNode, velocityNode, camera);
+        traaNode = traa(composite, depthNode, velocityNode, camera);
+        litNode = traaNode;
       }
       // Bloom по HDR-бликам (порог 1.0 — светятся только >1, диффуз не трогает).
       // Тон-маппинг/sRGB накладывает сам RenderPipeline (outputColorTransform).
@@ -327,6 +378,7 @@ export async function createSceneWebGPU(
       pipeline.dispose();
       pipeline = null;
     }
+    traaNode = null;
   }
 
   buildPipeline();
@@ -334,6 +386,18 @@ export async function createSceneWebGPU(
   // ── Цикл кадра, resize, твины (rAF, как в scene.ts). ────────────────────────
   const tweens = new TweenGroup();
   const frameCallbacks = new Set<() => void>();
+
+  // Фоновый догрев ЗАПАСНОГО комплекта пула мешей после свопа уровня (см.
+  // city.poolSpareNext): уровни живут стопкой decor'ов и держат свои меши,
+  // поэтому после drill пул пустеет, и следующий drill создавал бы новые
+  // InstancedMesh прямо на свопе (полный прогон node-builder — статтер ~1с).
+  // Греем по ОДНОМУ виду за кадр скрытым draw'ом (~90мс на кадр, но камера
+  // после свопа статична — подтормаживание не видно).
+  let spareWarmActive = false;
+  let spareWarmMesh: InstancedMesh | null = null;
+  const spareGroup = new Group();
+  spareGroup.position.set(0, -800, 0); // глубоко под землёй, вне кадра
+  scene.add(spareGroup);
 
   function resize() {
     const w = canvas.clientWidth || 1;
@@ -347,8 +411,45 @@ export async function createSceneWebGPU(
   resize();
 
   let running = true;
+
+  /**
+   * Дождаться `n` колбэков кадра rAF-цикла (≈ `n−1` завершённых рендеров) — для
+   * прогрева пайплайнов РЕАЛЬНЫМ `pipeline.render()`. С таймаутом-предохранителем:
+   * если цикл остановлен (dispose во время прогрева), промис всё равно резолвится
+   * и вызывающий не зависает.
+   */
+  function renderedFrames(n: number): Promise<void> {
+    return new Promise((resolve) => {
+      let left = n;
+      const timer = window.setTimeout(done, 1500);
+      const cb = () => {
+        if (--left <= 0) done();
+      };
+      function done() {
+        window.clearTimeout(timer);
+        frameCallbacks.delete(cb);
+        resolve();
+      }
+      frameCallbacks.add(cb);
+    });
+  }
+
   function tick() {
     if (!running) return;
+
+    // Догрев пула: меш прошлого кадра уже отрисован (node-состояния готовы) —
+    // вернуть в пул; затем взять следующий недостающий вид, если есть.
+    if (spareWarmMesh) {
+      spareGroup.remove(spareWarmMesh);
+      poolSpareRelease(spareWarmMesh);
+      spareWarmMesh = null;
+    }
+    if (spareWarmActive) {
+      spareWarmMesh = poolSpareNext();
+      if (spareWarmMesh) spareGroup.add(spareWarmMesh);
+      else spareWarmActive = false; // комплект полон
+    }
+
     tweens.update();
     applyPan();
     applyZoom();
@@ -358,6 +459,25 @@ export async function createSceneWebGPU(
     // путь r181+ вместо renderAsync(), раз бэкенд уже инициализирован (await init).
     if (pipeline) pipeline.render();
     else renderer.render(scene, camera);
+    if (teleportFlush) {
+      // Кадр телепорта: первый render выше прогнал пассы по НОВОЙ сцене, но
+      // из-за порядка обновления узлов («корень раньше детей») его итог собран
+      // ещё из таргетов прошлого кадра. Второй render в том же rAF рисует в ту
+      // же canvas-текстуру (презентуется он): beauty/SSGI уже с новой сценой, а
+      // повторный рестарт истории TRAA переинициализирует её начисто.
+      // КРИТИЧНО: FRAME-узлы (scene-pass, RTT-композит, TRAA) выполняются раз
+      // на nodeFrame.frameId, который three инкрементирует раз на БРАУЗЕРНЫЙ
+      // кадр (внутренний Animation-цикл), а не на render() — без ручного шага
+      // второй render перерисовал бы финальный квад из ТЕХ ЖЕ таргетов, и
+      // призрак прошлого уровня оставался на экране.
+      teleportFlush = false;
+      resetTraaHistory();
+      (
+        renderer as unknown as { _nodes: { nodeFrame: { update(): void } } }
+      )._nodes.nodeFrame.update();
+      if (pipeline) pipeline.render();
+      else renderer.render(scene, camera);
+    }
     requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
@@ -407,6 +527,8 @@ export async function createSceneWebGPU(
       camera.position.copy(position);
       controls.target.copy(target);
       controls.update();
+      invalidateTemporalHistory(); // телепорт: история TRAA от прошлой позиции
+      spareWarmActive = true; // после свопа дозаполнить пул (см. tick)
     },
     cameraTarget() {
       return controls.target.clone();
@@ -420,94 +542,53 @@ export async function createSceneWebGPU(
       };
     },
     async compile() {
-      // Создаем геометрию и материалы для «прогрева» кэша WebGPU.
-      // Нам нужно прогреть 3 конфигурации купола, чтобы при drill/up рантайм не зависал.
-      const testGeo = new SphereGeometry(1, 4, 4);
+      // Прогрев РЕАЛЬНЫМ конвейером. Прежний подход (`compileAsync` + свежие
+      // тест-материалы) не работал по трём причинам:
+      //  1) `compileAsync(scene, camera)` компилирует под ДЕФОЛТНЫЙ фреймбуфер, а
+      //     боевой кадр идёт через RenderPipeline/`pass()` с MRT (output+diffuse+
+      //     normal+velocity) — это другие фрагментные шейдеры и другие пайплайны;
+      //  2) тест-материалы не совпадали с боевыми (у куполов на webgpu есть
+      //     emissiveNode-контур) — грелся ЧУЖОЙ шейдер;
+      //  3) dispose тест-материалов в конце рушил refcount RenderObject'ов и
+      //     ВЫКИДЫВАЛ только что скомпилированные пайплайны из кэша рендера.
+      // Теперь прогреваем ПУЛОВЫЕ МЕШИ города (city.ts `meshPool` +
+      // `acquireWarmLevelMeshes`): rendarObject/node-состояния ключуются в т.ч.
+      // uuid'ом самого InstancedMesh (three#29066), поэтому греть надо именно
+      // те объекты, которыми потом рисует уровень — после release() первый
+      // уровень заберёт их из пула с готовыми состояниями всех проходов. Меши
+      // выставлены глубоко под землёй, но с `frustumCulled=false` — draw call
+      // состоится, а видно ничего не будет. Пара реальных кадров rAF-цикла
+      // строит все варианты: MRT-проход, transmission, shadow, рефлектор пола,
+      // SSGI/TRAA/bloom.
+      const warm = new Group();
+      warm.position.set(0, -800, 0);
+      const warmMeshes = acquireWarmLevelMeshes();
+      warm.add(warmMeshes.group);
+      // Одиночный купол extractDome — обычный Mesh (uuid в ключ не замешивается),
+      // достаточно любого экземпляра с боевым материалом.
+      const single = new Mesh(
+        getCachedDomeGeometry(),
+        getCachedDomeMaterial("flightSingle"),
+      );
+      single.frustumCulled = false;
+      warm.add(single);
 
-      const createTestMat = (flight: boolean) => {
-        if (quality.active.frostedGlass) {
-          const mat = new MeshPhysicalMaterial({
-            metalness: 0,
-            roughness: 0.38, // GLASS_ROUGHNESS
-            transmission: 1,
-            thickness: 6,
-            ior: quality.active.glassExtras ? 1.5 : 1.45,
-            transparent: true,
-            side: DoubleSide,
-            depthWrite: !flight,
-            envMapIntensity: 0.45,
-          });
-          if (quality.active.glassExtras) {
-            mat.attenuationColor = new Color(0xbfd3d9); // GLASS_ATTENUATION_COLOR
-            mat.attenuationDistance = 40; // GLASS_ATTENUATION_DISTANCE
-            mat.clearcoat = 0.5;
-            mat.clearcoatRoughness = 0.3;
-            mat.dispersion = 0.35; // GLASS_DISPERSION
-          }
-          if (flight) mat.color.set(0xcfd2d6); // GLASS_COLOR
-          return mat;
-        } else {
-          const mat = new MeshLambertMaterial({
-            transparent: true,
-            opacity: 0.28, // CHEAP_DOME_OPACITY
-            depthWrite: false,
-          });
-          if (flight) mat.color.set(0xcfd2d6); // GLASS_COLOR
-          return mat;
-        }
-      };
+      // Земля с рефлектором — реальный пуловый экземпляр: греет и программу
+      // пола, и reflector-проход остальных материалов (рефлектор рендерит сцену
+      // в свой RT со СВОИМ фрагментным вариантом каждого материала). После
+      // прогрева уходит в пул — первый уровень заберёт её без компиляции.
+      const warmGround = warmupGround();
+      warm.add(warmGround.mesh);
 
-      const meshFlight = new Mesh(testGeo, createTestMat(true));
-      const instMeshFlight = new InstancedMesh(testGeo, createTestMat(true), 1);
-      const instMeshStatic = new InstancedMesh(testGeo, createTestMat(false), 1);
-
-      scene.add(meshFlight);
-      scene.add(instMeshFlight);
-      scene.add(instMeshStatic);
-
-      // Прогреваем также все категории зданий, чтобы при их появлении после окончания
-      // анимации не происходило повторной компиляции и сборки геометрий в рантайме.
-      const buildingMeshes: InstancedMesh[] = [];
-      const CATEGORIES = [
-        "other",
-        "code",
-        "document",
-        "image",
-        "video",
-        "audio",
-        "archive",
-        "binary",
-      ] as const;
-
-      for (const cat of CATEGORIES) {
-        const def = makeBuildingDef(cat);
-        const instMesh = new InstancedMesh(def.geometry, def.materials, 1);
-        scene.add(instMesh);
-        buildingMeshes.push(instMesh);
-      }
-
+      scene.add(warm);
       try {
-        await renderer.compileAsync(scene, camera);
-      } catch (err) {
-        console.warn("прекомпиляция шейдеров (webgpu) не удалась:", err);
+        await renderedFrames(3);
       } finally {
-        scene.remove(meshFlight);
-        scene.remove(instMeshFlight);
-        scene.remove(instMeshStatic);
-
-        meshFlight.material.dispose();
-        instMeshFlight.material.dispose();
-        instMeshStatic.material.dispose();
-        testGeo.dispose();
-
-        for (const instMesh of buildingMeshes) {
-          scene.remove(instMesh);
-          if (Array.isArray(instMesh.material)) {
-            instMesh.material.forEach((m) => m.dispose());
-          } else {
-            instMesh.material.dispose();
-          }
-        }
+        scene.remove(warm);
+        // Ничего не dispose'им (иначе состояния выкинутся из кэшей) — меши
+        // возвращаются в пул живыми, кэшированные материалы живут.
+        warmMeshes.release();
+        warmGround.release();
       }
     },
     applyQuality() {
@@ -534,6 +615,7 @@ export async function createSceneWebGPU(
       camera.position.copy(INITIAL_CAMERA_POS);
       controls.target.copy(INITIAL_TARGET);
       controls.update();
+      invalidateTemporalHistory(); // мгновенный сброс вида = тот же телепорт
     },
     dispose() {
       running = false;

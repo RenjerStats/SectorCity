@@ -22,6 +22,18 @@ pub use state::AppState;
 /// кросс-платформенной фазы — на десктопе он не мешает.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebGPU: Dawn в WebView2 на Windows по умолчанию компилирует HLSL древним
+    // FXC — на тяжёлых шейдерах (transmission-купола) это сотни мс на пайплайн.
+    // `use_dxc` переключает на современный DXC (заметно быстрее компиляция).
+    // Именно env-переменная, не `additionalBrowserArguments` в конфиге окна: env
+    // ДОБАВЛЯЕТСЯ к аргументам браузера, а конфиг ЗАМЕЩАЕТ дефолты Tauri.
+    // Выставить нужно ДО создания webview; вне Windows WebView2 нет — гейт cfg.
+    #[cfg(windows)]
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--enable-dawn-features=use_dxc",
+    );
+
     // Логи управляются через RUST_LOG (env-filter). По умолчанию — info.
     tracing_subscriber::fmt()
         .with_env_filter(
