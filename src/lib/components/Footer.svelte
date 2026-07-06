@@ -103,29 +103,58 @@
   /* Кнопка легенды — прижата к правому краю. */
   .legend-btn {
     flex-shrink: 0;
-    font: inherit;
-    font-size: 0.72rem;
-    letter-spacing: var(--track-caps);
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 500;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
     color: var(--text-2);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--r-pill);
-    padding: 0.3rem 0.75rem;
+    background: transparent;
+    border: none;
+    padding: 0.4rem 0.9rem;
+    position: relative;
     cursor: pointer;
     white-space: nowrap;
-    transition:
-      color var(--motion-micro) var(--ease-out),
-      border-color var(--motion-micro) var(--ease-out),
-      background var(--motion-micro) var(--ease-out);
+    transition: color var(--motion-micro) var(--ease-out);
   }
-  .legend-btn:hover {
-    color: var(--text);
-    border-color: rgba(255, 255, 255, 0.2);
+  /* Боковые скобки */
+  .legend-btn::before,
+  .legend-btn::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    border: 1px solid var(--border);
+    transition:
+      border-color var(--motion-micro) var(--ease-out),
+      transform var(--motion-micro) var(--ease-out);
+  }
+  .legend-btn::before {
+    left: 0;
+    border-right: none;
+  }
+  .legend-btn::after {
+    right: 0;
+    border-left: none;
+  }
+  /* Анимация скобок при наведении */
+  .legend-btn:hover::before {
+    transform: translateX(-3px);
+    border-color: var(--text);
+  }
+  .legend-btn:hover::after {
+    transform: translateX(3px);
+    border-color: var(--text);
   }
   .legend-btn.on {
-    color: var(--accent);
+    color: var(--text);
+  }
+  .legend-btn.on::before,
+  .legend-btn.on::after {
     border-color: var(--accent);
-    background: var(--accent-soft);
   }
 </style>

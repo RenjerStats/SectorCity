@@ -264,7 +264,7 @@
     transition: background var(--motion-micro) var(--ease-out);
   }
   .reset:hover {
-    background: rgba(215, 25, 33, 0.22);
+    background: var(--accent-soft-hover);
   }
 
   .note {

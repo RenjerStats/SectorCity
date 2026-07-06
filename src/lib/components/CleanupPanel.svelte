@@ -312,6 +312,6 @@
   }
 
   .reset-filter:hover {
-    background: rgba(215, 25, 33, 0.22);
+    background: var(--accent-soft-hover);
   }
 </style>

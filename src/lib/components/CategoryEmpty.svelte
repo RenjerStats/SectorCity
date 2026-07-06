@@ -77,7 +77,7 @@
     font-family: inherit;
     font-size: 0.8rem;
     font-weight: 600;
-    color: #fff;
+    color: var(--accent-fg);
     background: var(--accent);
     border: none;
     border-radius: var(--r-pill);

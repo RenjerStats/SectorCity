@@ -238,7 +238,7 @@
     white-space: nowrap;
   }
   .btn-primary {
-    color: #fff;
+    color: var(--accent-fg);
     background: var(--accent);
     border-color: transparent;
   }

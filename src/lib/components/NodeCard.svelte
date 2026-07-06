@@ -33,9 +33,20 @@
     onHide?: (path: string) => void;
     /** Копировать путь узла в буфер (vision §I.9). */
     onCopyPath?: (path: string) => void;
+    /** Показывать ли пометки «кандидат на очистку» (причина/уверенность/объяснение).
+     *  Включается ТОЛЬКО в режиме сканера мусора: в обычном Обзоре подсказки
+     *  «этот файл — возможный мусор» сбивают с толку. */
+    showCleanup?: boolean;
   }
-  let { node, expanded, onReveal, onClose, onHide, onCopyPath }: Props =
-    $props();
+  let {
+    node,
+    expanded,
+    onReveal,
+    onClose,
+    onHide,
+    onCopyPath,
+    showCleanup = false,
+  }: Props = $props();
 
   // Синтетический блок «Прочее»: не файл и не папка — объединённая мелочь.
   let isAgg = $derived(node.flags.includes("aggregated"));
@@ -158,8 +169,9 @@
     </div>
 
     <!-- Причина кандидатуры на очистку — видна УЖЕ в компактном hover-виде
-         (полное объяснение — в развёрнутой карточке ниже). -->
-    {#if node.cleanup}
+         (полное объяснение — в развёрнутой карточке ниже). Только в режиме
+         сканера мусора (showCleanup): в Обзоре пометки сбивают с толку. -->
+    {#if showCleanup && node.cleanup}
       <div class="row reason-row">
         <span
           class="conf-dot"
@@ -247,7 +259,7 @@
           </div>
         {/if}
 
-        {#if node.cleanup && !node.flags.includes("locked")}
+        {#if showCleanup && node.cleanup && !node.flags.includes("locked")}
           <div class="cleanup-warning">
             <svg
               class="warning-icon"
@@ -705,7 +717,7 @@
     font-family: inherit;
     font-size: 0.8rem;
     font-weight: 600;
-    color: #fff;
+    color: var(--accent-fg);
     background: var(--accent);
     border: none;
     border-radius: var(--r-md);

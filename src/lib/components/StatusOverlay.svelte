@@ -147,7 +147,8 @@
     font-size: 0.85rem;
     color: var(--accent);
     background: var(--accent-soft);
-    border: 1px solid rgba(215, 25, 33, 0.3);
+    /* было захардкожено rgba(215,25,33,.3) — не перекрашивалось темами */
+    border: 1px solid var(--accent-soft);
     padding: 0.25rem 0.6rem;
     border-radius: var(--r-sm);
   }
@@ -157,7 +158,7 @@
     font-family: inherit;
     font-size: 0.9rem;
     font-weight: 600;
-    color: #fff;
+    color: var(--accent-fg);
     background: var(--accent);
     border: none;
     border-radius: var(--r-pill);

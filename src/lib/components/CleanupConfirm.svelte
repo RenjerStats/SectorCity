@@ -8,14 +8,15 @@
     cleanupConfirmOpen,
     setCleanupConfirm,
     dispatchCommand,
+    showToast,
   } from "../store/ui";
   import {
     markedForCleanup,
     markedCount,
     markedBytes,
-    clearMarks,
+    unmarkMany,
   } from "../store/mode";
-  import { formatSize } from "../format";
+  import { baseName, formatSize } from "../format";
   import { deleteToTrash } from "../ipc/commands";
 
   let open = $derived($cleanupConfirmOpen);
@@ -32,10 +33,6 @@
     setCleanupConfirm(false);
     errorMsg = "";
   }
-  function basename(path: string): string {
-    const seg = path.split(/[/\\]/).filter(Boolean);
-    return seg.length > 0 ? seg[seg.length - 1] : path;
-  }
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") close();
   }
@@ -48,8 +45,10 @@
       const paths = items.map(([path]) => path);
       const res = await deleteToTrash(paths);
 
-      // При подтверждённом сносе очищаем пометки
-      clearMarks();
+      // Снимаем пометки ТОЛЬКО с удалённого: неудалённые остаются в списке —
+      // видно, что именно не снеслось, и можно повторить попытку.
+      unmarkMany(res.deleted);
+      if (res.freed > 0) showToast(`Освобождено ${formatSize(res.freed)}`);
 
       if (res.failed.length > 0) {
         errorMsg = `Не удалось удалить ${res.failed.length} объектов. Они могут быть заблокированы процессом.`;
@@ -96,7 +95,7 @@
     <ul class="list">
       {#each items as [path, size] (path)}
         <li>
-          <span class="name" title={path}>{basename(path)}</span>
+          <span class="name" title={path}>{baseName(path)}</span>
           <span class="size">{formatSize(size)}</span>
         </li>
       {/each}
@@ -253,7 +252,7 @@
     border-color: rgba(255, 255, 255, 0.2);
   }
   .primary {
-    color: #fff;
+    color: var(--accent-fg);
     background: var(--accent);
     border-color: transparent;
     font-weight: 600;
