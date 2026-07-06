@@ -44,22 +44,32 @@ pub async fn start_scan(
     tracing::info!(%root, "start_scan");
 
     // Свежий токен отмены: храним клон в состоянии (для cancel_scan), второй
-    // отдаём в blocking-задачу.
+    // отдаём в blocking-задачу. Параллельный второй скан запрещён — он затёр бы
+    // токен первого (тот стал бы неотменяемым) и устроил гонку за `state.scan`.
     let token = CancellationToken::new();
-    *state.scan_cancel.lock().unwrap() = Some(token.clone());
+    {
+        let mut cancel_slot = state.scan_cancel.lock().unwrap();
+        if cancel_slot.is_some() {
+            return Err(AppError::Other("скан уже идёт".into()));
+        }
+        *cancel_slot = Some(token.clone());
+    }
 
     let emit_handle = app.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
+    let joined = tokio::task::spawn_blocking(move || {
         scan_with(&root, &token, move |progress| {
             // Ошибку эмита глотаем: скан важнее доставки прогресса.
             let _ = emit_handle.emit(SCAN_PROGRESS_EVENT, progress);
         })
     })
-    .await
-    .map_err(|e| AppError::Other(format!("скан-задача прервана: {e}")))??;
+    .await;
 
-    // Скан окончен (успех/отмена) — снять токен.
+    // Скан окончен (успех/ошибка/отмена) — снять токен ДО разворота результата,
+    // иначе ошибка скана оставила бы токен в стейте и гард выше заблокировал бы
+    // все последующие сканы («скан уже идёт» навсегда).
     *state.scan_cancel.lock().unwrap() = None;
+
+    let outcome = joined.map_err(|e| AppError::Other(format!("скан-задача прервана: {e}")))??;
 
     match outcome {
         ScanOutcome::Completed(tree) => {
@@ -262,18 +272,20 @@ pub async fn delete_to_trash(paths: Vec<String>, app: AppHandle) -> AppResult<De
         let mut failed = Vec::new();
         let mut freed = 0;
 
-        let mut scan_guard = state.scan.lock().unwrap();
-
+        // Мьютекс дерева берём ТОЧЕЧНО (проверка замка / правка после удаления):
+        // перемещение в корзину — медленный диск-IO, и удержание блокировки на всю
+        // партию вешало бы читателей (`get_level`, тултипы) на время сноса.
         for p in paths {
             let path_ref = std::path::Path::new(&p);
 
-            // Проверим замок безопасности: если файл помечен как системный, снос заблокирован
-            let mut is_locked = false;
-            if let Some(ref tree) = *scan_guard {
-                if let Some(idx) = tree.index_of(&p) {
-                    is_locked = tree.nodes[idx].is_locked;
-                }
-            }
+            // Замок безопасности: системные узлы не сносим.
+            let is_locked = state
+                .scan
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|tree| tree.index_of(&p).map(|idx| tree.nodes[idx].is_locked))
+                .unwrap_or(false);
 
             if is_locked {
                 tracing::warn!(%p, "попытка удалить заблокированный узел отклонена");
@@ -281,18 +293,16 @@ pub async fn delete_to_trash(paths: Vec<String>, app: AppHandle) -> AppResult<De
                 continue;
             }
 
-            // Перемещение в корзину через crate trash
+            // Перемещение в корзину через crate trash (вне блокировки дерева).
             match trash::delete(path_ref) {
                 Ok(_) => {
-                    let mut freed_bytes = 0;
-                    if let Some(ref mut tree) = *scan_guard {
+                    if let Some(ref mut tree) = *state.scan.lock().unwrap() {
                         // `make_mut`: обычно ссылка уникальна (фоновая запись снимка
                         // после скана давно завершена) → правка на месте без клона.
                         if let Some(bytes) = std::sync::Arc::make_mut(tree).delete_node(&p) {
-                            freed_bytes = bytes;
+                            freed += bytes;
                         }
                     }
-                    freed += freed_bytes;
                     deleted.push(p);
                 }
                 Err(e) => {
@@ -302,13 +312,13 @@ pub async fn delete_to_trash(paths: Vec<String>, app: AppHandle) -> AppResult<De
             }
         }
 
-        // Обновить снимок SQLite
+        // Обновить снимок SQLite: свою `Arc`-ссылку держим вне блокировки, чтобы
+        // запись на диск не останавливала IPC-читателей.
         if !deleted.is_empty() {
-            if let Some(ref tree) = *scan_guard {
-                if let Some(db_path) = snapshot_db_path(&app_handle) {
-                    if let Err(e) = snapshot::save(tree, &db_path) {
-                        tracing::warn!(error = %e, "не удалось перезаписать снимок после удаления");
-                    }
+            let tree_ref = state.scan.lock().unwrap().clone();
+            if let (Some(tree), Some(db_path)) = (tree_ref, snapshot_db_path(&app_handle)) {
+                if let Err(e) = snapshot::save(&tree, &db_path) {
+                    tracing::warn!(error = %e, "не удалось перезаписать снимок после удаления");
                 }
             }
         }

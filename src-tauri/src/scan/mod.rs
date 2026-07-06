@@ -116,6 +116,7 @@ impl ScanTree {
 
         if let Some(&parent_idx) = self.by_path.get(parent_path_str.as_ref()) {
             self.nodes[parent_idx].children.retain(|&c| c != idx);
+            self.nodes[parent_idx].child_count = self.nodes[parent_idx].children.len() as u32;
 
             // 3. Скорректируем размеры родителей вверх до корня
             let mut curr = Some(parent_idx);
